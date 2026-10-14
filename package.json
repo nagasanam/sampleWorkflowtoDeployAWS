@@ -1,0 +1,11 @@
+
+{
+  "name": "nodejs-aws-demo",
+  "version": "1.0.0",
+  "description": "Node.js CI/CD demo with GitHub Actions and AWS",
+  "main": "app.js",
+  "scripts": {
+    "start": "node app.js",
+    "test": "node --test"
+  }
+}

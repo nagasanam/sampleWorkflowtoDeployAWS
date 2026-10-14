@@ -1,41 +1,5 @@
-<<<<<<< HEAD
-name: Test and deploy to AWS
 
-on:
-  pull_request:
-  push:
-    branches: [main]
-
-permissions:
-  contents: read
-  id-token: write
-
-jobs:
-  test:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 20
-          cache: npm
-
-      - run: npm ci
-      - run: npm test
-      - run: npm run build
-
-  deploy:
-    needs: test
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Configure AWS credentials
-=======
-
-name: Test, Build and Deploy to AWS ECS
+name: Test, Build and Deploy Node.js to AWS EC2
 
 on:
   push:
@@ -50,7 +14,7 @@ permissions:
 
 jobs:
   test:
-    name: Run Tests
+    name: Run Node.js Tests
     runs-on: ubuntu-latest
 
     steps:
@@ -60,90 +24,81 @@ jobs:
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: "20"
-          cache: npm
+          node-version: "22"
 
       - name: Install dependencies
-        run: npm ci
+        run: npm install
 
-      - name: Run unit tests
+      - name: Run tests
         run: npm test
 
-  build-and-deploy:
-    name: Build and Deploy to AWS
+  deploy:
+    name: Build and Deploy to EC2
+    runs-on: ubuntu-latest
     needs: test
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
 
     permissions:
       contents: read
       id-token: write
+
+    env:
+      AWS_REGION: ${{ vars.AWS_REGION }}
+      AWS_ACCOUNT_ID: ${{ vars.AWS_ACCOUNT_ID }}
+      ECR_REPOSITORY: ${{ vars.ECR_REPOSITORY }}
 
     steps:
       - name: Checkout source code
         uses: actions/checkout@v4
 
       - name: Configure AWS credentials using OIDC
->>>>>>> 426b392d5fd4b321b263e4cca852c4392a2c78d1
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
-          aws-region: ${{ vars.AWS_REGION }}
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
 
       - name: Log in to Amazon ECR
-<<<<<<< HEAD
         id: ecr
         uses: aws-actions/amazon-ecr-login@v2
 
-      - name: Build and push image
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          push: true
-          tags: ${{ steps.ecr.outputs.registry }}/${{ vars.ECR_REPOSITORY }}:${{ github.sha }}
-
-      - name: Update task definition with new image
-        id: task-def
-        uses: aws-actions/amazon-ecs-render-task-definition@v1
-        with:
-          task-definition: task-definition.json
-          container-name: ${{ vars.ECS_CONTAINER_NAME }}
-          image: ${{ steps.ecr.outputs.registry }}/${{ vars.ECR_REPOSITORY }}:${{ github.sha }}
-
-      - name: Deploy to ECS
-=======
-        id: login-ecr
-        uses: aws-actions/amazon-ecr-login@v2
+      - name: Set Docker image details
+        id: image
+        run: |
+          echo "uri=${{ env.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com/${{ env.ECR_REPOSITORY }}:${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
 
       - name: Build and push Docker image
-        id: build-image
         env:
-          REGISTRY: ${{ steps.login-ecr.outputs.registry }}
-          REPOSITORY: ${{ vars.ECR_REPOSITORY }}
-          IMAGE_TAG: ${{ github.sha }}
+          IMAGE_URI: ${{ steps.image.outputs.uri }}
         run: |
-          docker build -t $REGISTRY/$REPOSITORY:$IMAGE_TAG .
-          docker push $REGISTRY/$REPOSITORY:$IMAGE_TAG
-          echo "image=$REGISTRY/$REPOSITORY:$IMAGE_TAG" >> $GITHUB_OUTPUT
+          docker build -t "$IMAGE_URI" .
+          docker push "$IMAGE_URI"
 
-      - name: Render ECS task definition
-        id: task-def
-        uses: aws-actions/amazon-ecs-render-task-definition@v1
+      - name: Set up SSH
+        uses: webfactory/ssh-agent@v0.9.0
         with:
-          task-definition: ecs-task-definition.json
-          container-name: my-app
-          image: ${{ steps.build-image.outputs.image }}
+          ssh-private-key: ${{ secrets.EC2_SSH_KEY }}
 
-      - name: Deploy to Amazon ECS
->>>>>>> 426b392d5fd4b321b263e4cca852c4392a2c78d1
-        uses: aws-actions/amazon-ecs-deploy-task-definition@v2
-        with:
-          task-definition: ${{ steps.task-def.outputs.task-definition }}
-          service: ${{ vars.ECS_SERVICE }}
-          cluster: ${{ vars.ECS_CLUSTER }}
-<<<<<<< HEAD
-          wait-for-service-stability: truegit 
-=======
-          wait-for-service-stability: true
-          :
->>>>>>> 426b392d5fd4b321b263e4cca852c4392a2c78d1
+      - name: Configure SSH host verification
+        env:
+          KNOWN_HOSTS: ${{ secrets.EC2_KNOWN_HOSTS }}
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s\n' "$KNOWN_HOSTS" > ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/known_hosts
+
+      - name: Deploy container to EC2
+        env:
+          EC2_HOST: ${{ vars.EC2_HOST }}
+          EC2_USER: ${{ vars.EC2_USER }}
+          IMAGE_URI: ${{ steps.image.outputs.uri }}
+          AWS_REGION: ${{ env.AWS_REGION }}
+        run: |
+          ssh "$EC2_USER@$EC2_HOST" \
+            "aws ecr get-login-password --region '$AWS_REGION' \
+            | docker login --username AWS --password-stdin \
+            '${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com' \
+            && docker pull '$IMAGE_URI' \
+            && (docker stop nodejs-app || true) \
+            && (docker rm nodejs-app || true) \
+            && docker run -d --restart unless-stopped \
+              --name nodejs-app -p 3000:3000 '$IMAGE_URI'"
