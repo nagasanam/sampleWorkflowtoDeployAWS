@@ -102,3 +102,5 @@ jobs:
             && (docker rm nodejs-app || true) \
             && docker run -d --restart unless-stopped \
               --name nodejs-app -p 3000:3000 '$IMAGE_URI'"
+
+              
