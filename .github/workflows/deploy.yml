@@ -1,5 +1,5 @@
 
-name: Test, Build and Deploy Node.js to AWS EC2
+name: Test, Build and Deploy Node.js to Render
 
 on:
   push:
@@ -32,73 +32,41 @@ jobs:
       - name: Run tests
         run: npm test
 
-  deploy:
-    name: Build and Deploy to EC2
+  build:
+    name: Build Docker Image
     runs-on: ubuntu-latest
     needs: test
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-
-    permissions:
-      contents: read
-      id-token: write
-
-    env:
-      AWS_REGION: ${{ vars.AWS_REGION }}
-      AWS_ACCOUNT_ID: ${{ vars.AWS_ACCOUNT_ID }}
-      ECR_REPOSITORY: ${{ vars.ECR_REPOSITORY }}
 
     steps:
       - name: Checkout source code
         uses: actions/checkout@v4
 
-      - name: Configure AWS credentials using OIDC
-        uses: aws-actions/configure-aws-credentials@v4
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build Docker image
+        uses: docker/build-push-action@v6
         with:
-          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
-          aws-region: ${{ env.AWS_REGION }}
+          context: .
+          file: ./Dockerfile
+          push: false
+          tags: nodejs-aws-demo:${{ github.sha }}
 
-      - name: Log in to Amazon ECR
-        id: ecr
-        uses: aws-actions/amazon-ecr-login@v2
+  deploy:
+    name: Deploy to Render
+    runs-on: ubuntu-latest
+    needs: [test, build]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
 
-      - name: Set Docker image details
-        id: image
-        run: |
-          echo "uri=${{ env.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com/${{ env.ECR_REPOSITORY }}:${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
-
-      - name: Build and push Docker image
+    steps:
+      - name: Trigger Render deployment
         env:
-          IMAGE_URI: ${{ steps.image.outputs.uri }}
+          RENDER_DEPLOY_HOOK: ${{ secrets.RENDER_DEPLOY_HOOK }}
         run: |
-          docker build -t "$IMAGE_URI" .
-          docker push "$IMAGE_URI"
+          if [ -z "$RENDER_DEPLOY_HOOK" ]; then
+            echo "RENDER_DEPLOY_HOOK secret is missing"
+            exit 1
+          fi
 
-      - name: Set up SSH
-        uses: webfactory/ssh-agent@v0.9.0
-        with:
-          ssh-private-key: ${{ secrets.EC2_SSH_KEY }}
-
-      - name: Configure SSH host verification
-        env:
-          KNOWN_HOSTS: ${{ secrets.EC2_KNOWN_HOSTS }}
-        run: |
-          mkdir -p ~/.ssh
-          printf '%s\n' "$KNOWN_HOSTS" > ~/.ssh/known_hosts
-          chmod 600 ~/.ssh/known_hosts
-
-      - name: Deploy container to EC2
-        env:
-          EC2_HOST: ${{ vars.EC2_HOST }}
-          EC2_USER: ${{ vars.EC2_USER }}
-          IMAGE_URI: ${{ steps.image.outputs.uri }}
-          AWS_REGION: ${{ env.AWS_REGION }}
-        run: |
-          ssh "$EC2_USER@$EC2_HOST" \
-            "aws ecr get-login-password --region '$AWS_REGION' \
-            | docker login --username AWS --password-stdin \
-            '${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com' \
-            && docker pull '$IMAGE_URI' \
-            && (docker stop nodejs-app || true) \
-            && (docker rm nodejs-app || true) \
-            && docker run -d --restart unless-stopped \
-              --name nodejs-app -p 3000:3000 '$IMAGE_URI'"           
+          curl --fail-with-body --silent --show-error \
+            --request POST "$RENDER_DEPLOY_HOOK"
