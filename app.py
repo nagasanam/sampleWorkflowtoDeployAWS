@@ -1,19 +1,8 @@
 
-const http = require("http");
 
-const PORT = process.env.PORT || 3000;
+def hello_world():
+    return "Hello, World!"
 
-const server = http.createServer((req, res) => {
-  res.writeHead(200, { "Content-Type": "application/json" });
 
-  res.end(
-    JSON.stringify({
-      message: "Node.js application deployed successfully to AWS!",
-      status: "OK"
-    })
-  );
-});
-
-server.listen(PORT, "0.0.0.0", () => {
-  console.log(`Server running on port ${PORT}`);
-});
+if __name__ == "__main__":
+    print(hello_world())
