@@ -1,5 +1,4 @@
 
-
 name: Python Hello World CI
 
 on:
@@ -15,29 +14,37 @@ on:
 permissions:
   contents: read
 
-  
 jobs:
   build-and-test:
-    name: Build, Test and Code Coverage
+    name: Build, Lint, Test and Code Coverage
     runs-on: ubuntu-latest
 
     steps:
+      # Step 1: Checkout source code
       - name: Checkout source code
         uses: actions/checkout@v4
 
+      # Step 2: Set up Python
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
 
-      - name: Install testing and coverage dependencies
+      # Step 3: Install dependencies
+      - name: Install testing, coverage and linting dependencies
         run: |
           python -m pip install --upgrade pip
-          python -m pip install pytest pytest-cov
+          python -m pip install pytest pytest-cov pylint
 
+      # Step 4: Run Pylint code analysis
+      - name: Analyze Python code with Pylint
+        run: python -m pylint hello.py
+
+      # Step 5: Build - Compile Python files
       - name: Build - Compile Python files
         run: python -m compileall -q .
 
+      # Step 6: Run unit tests with code coverage
       - name: Run unit tests with code coverage
         run: |
           python -m pytest -v \
@@ -45,9 +52,11 @@ jobs:
             --cov-report=term-missing \
             --cov-report=xml:coverage.xml
 
+      # Step 7: Run Hello World application
       - name: Run Hello World application
         run: python hello.py
 
+      # Step 8: Upload code coverage report
       - name: Upload code coverage report
         if: always()
         uses: actions/upload-artifact@v4
@@ -55,7 +64,3 @@ jobs:
           name: python-coverage-report
           path: coverage.xml
           if-no-files-found: ignore
-
-
-
-            
