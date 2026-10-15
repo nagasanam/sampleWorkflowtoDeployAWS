@@ -6,9 +6,11 @@ on:
     branches:
       - main
       - 'feature/**'
+
   pull_request:
     branches:
       - main
+
   workflow_dispatch:
 
 permissions:
@@ -36,19 +38,20 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install pytest pytest-cov pylint
 
-      # Step 4: Run Pylint code analysis
+      # Step 4: Pylint quality gate - minimum score 8/10
       - name: Analyze Python code with Pylint
-        run: python -m pylint hello.py
+        run: python -m pylint --fail-under=8.0 hello.py
 
-      # Step 5: Build - Compile Python files
+      # Step 5: Compile Python files
       - name: Build - Compile Python files
         run: python -m compileall -q .
 
-      # Step 6: Run unit tests with code coverage
+      # Step 6: Run unit tests with minimum 80% coverage
       - name: Run unit tests with code coverage
         run: |
           python -m pytest -v \
             --cov=hello \
+            --cov-fail-under=80 \
             --cov-report=term-missing \
             --cov-report=xml:coverage.xml
 
