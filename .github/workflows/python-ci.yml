@@ -1,77 +1,100 @@
 name: Python Hello World CI
 
+# 1. Workflow trigger options
 on:
+  # Run when code is pushed to main or a feature branch
   push:
     branches:
       - main
       - 'feature/**'
 
+  # Run when a pull request targets main
   pull_request:
     branches:
       - main
 
+  # Allow manual execution from GitHub Actions
   workflow_dispatch:
+    inputs:
+      run_pylint:
+        description: 'Run Pylint code quality checks'
+        required: true
+        type: boolean
+        default: true
 
+  # Allow another workflow to call this workflow
+  workflow_call:
+    secrets:
+      API_TOKEN:
+        required: false
+
+  # Optional weekly execution (uncomment to enable)
+  # schedule:
+  #   - cron: '0 9 * * 1'
+
+# 2. Minimum repository permissions
 permissions:
   contents: read
 
-# GitHub repository variables
+# 3. GitHub repository variables
 env:
-  APP_NAME: ${{ vars.APP_NAME }}
-  ENVIRONMENT: ${{ vars.ENVIRONMENT }}
+  APP_NAME: ${{ vars.APP_NAME || 'Python-Hello-World' }}
+  ENVIRONMENT: ${{ vars.ENVIRONMENT || 'development' }}
+  PYTHON_VERSION: ${{ vars.PYTHON_VERSION || '3.12' }}
+  LOG_LEVEL: ${{ vars.LOG_LEVEL || 'INFO' }}
 
 jobs:
   build-and-test:
-    name: Build, Lint, Test and Code Coverage
+    name: Build, Test, Pylint and Coverage
     runs-on: ubuntu-latest
 
     steps:
-      # Step 1: Checkout source code
+      # 4. Checkout repository code
       - name: Checkout source code
         uses: actions/checkout@v4
 
-      # Step 2: Set up Python
+      # 5. Configure Python
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.12'
+          python-version: ${{ env.PYTHON_VERSION }}
 
-      # Step 3: Read GitHub Variables
-      - name: Display application configuration
-        run: |
-          echo "Application: $APP_NAME"
-          echo "Environment: $ENVIRONMENT"
-
-      # Step 4: Install dependencies
+      # 6. Install testing and code-quality tools
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           python -m pip install pytest pytest-cov pylint
 
-      # Step 5: Run Pylint quality gate
+      # 7. Read GitHub Variables
+      - name: Display application configuration
+        run: |
+          echo "Application: $APP_NAME"
+          echo "Environment: $ENVIRONMENT"
+          echo "Python version: $PYTHON_VERSION"
+          echo "Log level: $LOG_LEVEL"
+
+      # 8. Compile Python code
+      - name: Build Python application
+        run: python -m compileall -q .
+
+      # 9. Pylint quality gate
       - name: Analyze Python code with Pylint
-        run: |
-          python -m pylint --fail-under=8.0 hello.py
+        if: ${{ github.event_name != 'workflow_dispatch' || inputs.run_pylint }}
+        run: python -m pylint hello.py --fail-under=8.0
 
-      # Step 6: Compile Python files
-      - name: Compile Python files
-        run: |
-          python -m compileall -q .
-
-      # Step 7: Run tests and generate coverage report
-      - name: Run Python tests with coverage
+      # 10. Run tests and generate coverage
+      - name: Run unit tests and code coverage
         run: |
           python -m pytest -v \
             --cov=hello \
             --cov-report=term-missing \
             --cov-report=xml:coverage.xml
 
-      # Step 8: Run Python application
-      - name: Run Python application
-        run: |
-          python hello.py
+      # 11. Run the Python application
+      - name: Run application
+        run: python hello.py
 
-      # Step 9: Check whether GitHub Secret is configured
+      # 12. Access the optional GitHub Secret safely
       - name: Check API token configuration
         env:
           API_TOKEN: ${{ secrets.API_TOKEN }}
@@ -79,14 +102,14 @@ jobs:
           if [ -n "$API_TOKEN" ]; then
             echo "API_TOKEN is configured."
           else
-            echo "API_TOKEN is not configured."
+            echo "API_TOKEN is not configured; skipping authenticated operations."
           fi
 
-      # Step 10: Upload coverage report
+      # 13. Upload coverage report
       - name: Upload coverage report
-        if: always()
+        if: always() && hashFiles('coverage.xml') != ''
         uses: actions/upload-artifact@v4
         with:
           name: python-coverage-report
           path: coverage.xml
-          if-no-files-found: ignore
+          retention-days: 7
