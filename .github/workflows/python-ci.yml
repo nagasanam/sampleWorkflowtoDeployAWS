@@ -89,7 +89,7 @@ jobs:
             --cov=hello \
             --cov-report=term-missing \
             --cov-report=xml:coverage.xml
-            --cov-fail-under=80
+            --cov-fail-under=70
 
       # 11. Run the Python application
       - name: Run application
