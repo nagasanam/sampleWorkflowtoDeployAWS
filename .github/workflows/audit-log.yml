@@ -1,163 +1,509 @@
 
-# Name displayed in the GitHub Actions tab.
+# ============================================================
+# GitHub Actions Audit Log
+# ============================================================
 name: GitHub Actions Audit Log
 
-# Define when this audit workflow should run.
+# ============================================================
+# 1. WORKFLOW TRIGGERS
+# ============================================================
 on:
-  # Automatically run after the Python Hello World CI workflow completes.
+  # Record pushes to important branches.
+  push:
+    branches:
+      - main
+      - master
+      - release
+      - 'feature/**'
+
+  # Record pull request activity and merges.
+  pull_request:
+    types:
+      - opened
+      - synchronize
+      - reopened
+      - closed
+
+  # Record published releases.
+  release:
+    types:
+      - published
+
+  # Record completed CI workflows.
+  # Add your exact deployment/Terraform workflow names here
+  # when those workflows are created.
   workflow_run:
-    # The exact name of the workflow being monitored.
     workflows:
       - Python Hello World CI
-
-    # Run after the monitored workflow reaches a completed state,
-    # whether it succeeded, failed, or was cancelled.
     types:
       - completed
 
-  # Allow an authorized user to start the audit workflow manually.
+  # Record deployment status changes.
+  deployment_status:
+
+  # Permit manual execution.
   workflow_dispatch:
 
-# Grant only the permissions required by this workflow.
+# ============================================================
+# 2. PERMISSIONS
+# ============================================================
 permissions:
-  # Allow reading workflow run details through the GitHub API.
   actions: read
-
-  # Allow checking out or reading repository contents if needed.
   contents: read
+  pull-requests: read
+  deployments: read
 
-# Define the jobs executed by this workflow.
+# ============================================================
+# 3. AUDIT JOB
+# ============================================================
 jobs:
-  # Job identifier used internally by GitHub Actions.
   audit:
-    # Friendly name displayed in the Actions run page.
-    name: Generate Workflow Audit Record
-
-    # Use a GitHub-hosted Ubuntu runner.
+    name: Generate Comprehensive Audit Record
     runs-on: ubuntu-latest
 
-    # Define the steps that generate and save the audit record.
     steps:
-      # Create a JSON audit record and display its details in the run summary.
-      - name: Create audit record
+      # ------------------------------------------------------
+      # 3.1 Download coverage evidence from the Python CI run.
+      # This expects the CI workflow to upload an artifact named
+      # python-coverage-report containing coverage.xml.
+      # ------------------------------------------------------
+      - name: Download Python CI coverage artifact
+        if: github.event_name == 'workflow_run'
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: python-coverage-report
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          path: ci-artifacts
 
-        # Use GitHub's JavaScript scripting action.
+      # ------------------------------------------------------
+      # 3.2 Extract coverage percentage when coverage.xml exists.
+      # ------------------------------------------------------
+      - name: Extract coverage percentage
+        if: github.event_name == 'workflow_run'
+        continue-on-error: true
+        run: |
+          python - <<'PY'
+          import json
+          import pathlib
+          import xml.etree.ElementTree as ET
+
+          result = {
+              "coverage_percentage": None,
+              "coverage_source": None
+          }
+
+          for path in pathlib.Path("ci-artifacts").rglob("coverage.xml"):
+              try:
+                  root = ET.parse(path).getroot()
+                  rate = root.attrib.get("line-rate")
+
+                  if rate is not None:
+                      result["coverage_percentage"] = round(
+                          float(rate) * 100, 2
+                      )
+                      result["coverage_source"] = str(path)
+                      break
+              except (ET.ParseError, OSError, ValueError):
+                  continue
+
+          pathlib.Path("coverage-summary.json").write_text(
+              json.dumps(result, indent=2) + "\n",
+              encoding="utf-8"
+          )
+
+          print(json.dumps(result, indent=2))
+          PY
+
+      # ------------------------------------------------------
+      # 3.3 Collect audit evidence from GitHub APIs and events.
+      # ------------------------------------------------------
+      - name: Collect audit evidence
         uses: actions/github-script@v7
-
-        # Pass the JavaScript script to the action.
         with:
           script: |
-            // Import Node.js file-system functions to write the audit JSON file.
             const fs = require('fs');
 
-            // Get the completed workflow run details when triggered by workflow_run.
-            // This value is undefined for a manual workflow_dispatch run.
-            const run = context.payload.workflow_run;
+            const p = context.payload;
+            const event = context.eventName;
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const server = context.serverUrl;
 
-            // Identify whether the workflow was started manually.
-            const manual = context.eventName === 'workflow_dispatch';
+            const run = p.workflow_run || null;
+            const pr = p.pull_request || null;
+            const release = p.release || null;
 
-            // Build the audit record using available workflow metadata.
-            const record = {
-              // Record when this audit entry was generated in UTC.
-              recorded_at: new Date().toISOString(),
+            const deployment =
+              p.deployment ||
+              p.deployment_status?.deployment ||
+              null;
 
-              // Record the repository owner and repository name.
-              repository: `${context.repo.owner}/${context.repo.repo}`,
+            const deploymentStatus = p.deployment_status || null;
 
-              // Record the event that triggered this audit workflow.
-              event: context.eventName,
-
-              // Record the monitored workflow name, or this workflow's name as a fallback.
-              workflow_name: run?.name || context.workflow,
-
-              // Record the monitored run ID, or the current audit run ID for manual runs.
-              workflow_run_id: run?.id || context.runId,
-
-              // Record the URL of the monitored workflow run when available.
-              workflow_run_url: run?.html_url || '',
-
-              // Record the user associated with the monitored run, when available.
-              actor: run?.actor?.login || context.actor,
-
-              // Record who initiated the monitored run, when available.
-              triggering_actor: run?.triggering_actor?.login || context.actor,
-
-              // Record the source branch, falling back to the current ref.
-              branch: run?.head_branch ||
-                context.ref.replace('refs/heads/', ''),
-
-              // Record the commit SHA associated with the monitored run.
-              commit_sha: run?.head_sha || context.sha,
-
-              // Record the monitored workflow result.
-              // For a manual audit, use a label rather than claiming CI succeeded.
-              conclusion: run?.conclusion || 'manual-audit'
+            // Read coverage collected by the previous step.
+            let coverage = {
+              coverage_percentage: null,
+              coverage_source: null
             };
 
-            // Write the audit record to a formatted JSON file.
+            if (fs.existsSync('coverage-summary.json')) {
+              try {
+                coverage = JSON.parse(
+                  fs.readFileSync('coverage-summary.json', 'utf8')
+                );
+              } catch (e) {
+                core.warning(`Could not read coverage summary: ${e.message}`);
+              }
+            }
+
+            // ------------------------------------------------
+            // CODE CHANGES: push commits and pull request commits
+            // ------------------------------------------------
+            let commits = (p.commits || []).map(c => ({
+              sha: c.id,
+              message: c.message,
+              author: c.author?.name || 'Unknown'
+            }));
+
+            if (pr?.number) {
+              try {
+                const result = await github.rest.pulls.listCommits({
+                  owner,
+                  repo,
+                  pull_number: pr.number,
+                  per_page: 100
+                });
+
+                commits = result.data.map(c => ({
+                  sha: c.sha,
+                  message: c.commit.message,
+                  author: c.author?.login ||
+                    c.commit.author?.name || 'Unknown'
+                }));
+              } catch (e) {
+                core.warning(`Could not retrieve PR commits: ${e.message}`);
+              }
+            }
+
+            // ------------------------------------------------
+            // RELEASE TRACEABILITY: resolve tag to commit SHA
+            // ------------------------------------------------
+            let releaseCommitSha = null;
+
+            if (release?.tag_name) {
+              try {
+                const result = await github.rest.repos.getCommit({
+                  owner,
+                  repo,
+                  ref: release.tag_name
+                });
+
+                releaseCommitSha = result.data.sha;
+              } catch (e) {
+                core.warning(`Could not resolve release tag: ${e.message}`);
+              }
+            }
+
+            // ------------------------------------------------
+            // WORKFLOW RESULTS: jobs, timestamps and failed steps
+            // ------------------------------------------------
+            let jobs = [];
+            let artifacts = [];
+
+            if (run?.id) {
+              try {
+                const result =
+                  await github.rest.actions.listJobsForWorkflowRun({
+                    owner,
+                    repo,
+                    run_id: run.id,
+                    per_page: 100
+                  });
+
+                jobs = result.data.jobs.map(j => ({
+                  job_name: j.name,
+                  status: j.status,
+                  conclusion: j.conclusion,
+                  started_at: j.started_at,
+                  completed_at: j.completed_at,
+                  job_url: j.html_url,
+                  failed_steps: (j.steps || [])
+                    .filter(s =>
+                      s.conclusion === 'failure' ||
+                      s.conclusion === 'cancelled'
+                    )
+                    .map(s => ({
+                      name: s.name,
+                      conclusion: s.conclusion,
+                      number: s.number
+                    }))
+                }));
+              } catch (e) {
+                core.warning(`Could not retrieve jobs: ${e.message}`);
+              }
+
+              try {
+                const result =
+                  await github.rest.actions.listWorkflowRunArtifacts({
+                    owner,
+                    repo,
+                    run_id: run.id,
+                    per_page: 100
+                  });
+
+                artifacts = result.data.artifacts.map(a => ({
+                  name: a.name,
+                  size_bytes: a.size_in_bytes,
+                  expired: a.expired,
+                  created_at: a.created_at
+                }));
+              } catch (e) {
+                core.warning(`Could not retrieve artifacts: ${e.message}`);
+              }
+            }
+
+            // Classify jobs using their configured names.
+            const qualityJobs = jobs.filter(j =>
+              /test|coverage|pylint|lint|quality|security|build/i
+                .test(j.job_name)
+            );
+
+            const terraformJobs = jobs.filter(j =>
+              /terraform.*(plan|apply)|(plan|apply).*terraform/i
+                .test(j.job_name)
+            );
+
+            const failedJobs = jobs.filter(j =>
+              j.conclusion === 'failure' ||
+              j.conclusion === 'cancelled'
+            );
+
+            const failedSteps = jobs.flatMap(j =>
+              j.failed_steps.map(s => ({
+                job: j.job_name,
+                job_url: j.job_url,
+                step: s.name,
+                conclusion: s.conclusion
+              }))
+            );
+
+            // ------------------------------------------------
+            // CODE CHANGE METADATA
+            // ------------------------------------------------
+            const branch =
+              run?.head_branch ||
+              pr?.head?.ref ||
+              (p.ref || context.ref).replace('refs/heads/', '');
+
+            const commitSha =
+              run?.head_sha ||
+              pr?.head?.sha ||
+              p.after ||
+              context.sha;
+
+            const codeChanges = {
+              branch,
+              commit_sha: commitSha,
+              before_sha: p.before || null,
+              after_sha: p.after || null,
+              commits,
+              push_actor: p.pusher?.name || null,
+              pull_request: pr ? {
+                number: pr.number,
+                title: pr.title,
+                author: pr.user?.login || null,
+                state: pr.state,
+                merged: pr.merged,
+                merged_at: pr.merged_at || null,
+                merged_by: pr.merged_by?.login || null,
+                merge_commit_sha: pr.merge_commit_sha || null,
+                url: pr.html_url
+              } : null
+            };
+
+            // ------------------------------------------------
+            // DEPLOYMENT TRACKING
+            // Region and artifact version must be supplied by
+            // a deployment workflow; GitHub does not guarantee
+            // those values in deployment event payloads.
+            // ------------------------------------------------
+            const deploymentRecord = deployment ? {
+              deployment_id: deployment.id,
+              environment: deployment.environment || null,
+              ref: deployment.ref || null,
+              commit_sha: deployment.sha || null,
+              created_at: deployment.created_at || null,
+              status: deploymentStatus?.state || null,
+              status_updated_at: deploymentStatus?.updated_at || null,
+              status_description: deploymentStatus?.description || null,
+              status_creator: deploymentStatus?.creator?.login || null,
+              region: null,
+              artifact_version: null
+            } : null;
+
+            // ------------------------------------------------
+            // TESTING, QUALITY GATES AND INFRASTRUCTURE
+            // These job results are available only for the
+            // monitored source workflow run.
+            // ------------------------------------------------
+            const testingAndQuality = {
+              source_workflow: run?.name || null,
+              overall_ci_result: run?.conclusion || null,
+              jobs: qualityJobs,
+              coverage_percentage: coverage.coverage_percentage,
+              coverage_source: coverage.coverage_source,
+              quality_gate_outcome:
+                qualityJobs.length > 0
+                  ? qualityJobs.map(j => ({
+                      job: j.job_name,
+                      conclusion: j.conclusion
+                    }))
+                  : null
+            };
+
+            const infrastructure = {
+              terraform_jobs: terraformJobs,
+              plan_result: null,
+              apply_result: null,
+              evidence_artifacts: artifacts.filter(a =>
+                /terraform|plan|apply|deployment|evidence/i.test(a.name)
+              ),
+              note:
+                'Actual plan/apply results require Terraform workflow outputs or artifacts.'
+            };
+
+            // ------------------------------------------------
+            // FAILURE TRACKING
+            // ------------------------------------------------
+            const failures = {
+              failed_or_cancelled_jobs: failedJobs,
+              failed_or_cancelled_steps: failedSteps,
+              detail_note:
+                'Job links provide access to console logs. Full error messages are not automatically copied into this JSON record.'
+            };
+
+            // ------------------------------------------------
+            // APPROVAL TRACKING
+            // A deployment status creator is not necessarily
+            // the person who approved a protected environment.
+            // ------------------------------------------------
+            const approvals = {
+              environment: deployment?.environment || null,
+              status_creator: deploymentStatus?.creator?.login || null,
+              deployment_status: deploymentStatus?.state || null,
+              approver: null,
+              approval_timestamp: null,
+              note:
+                'Populate approver and approval timestamp from actual protected-environment approval evidence.'
+            };
+
+            // ------------------------------------------------
+            // COMPLETE AUDIT RECORD
+            // ------------------------------------------------
+            const record = {
+              recorded_at: new Date().toISOString(),
+              repository: `${owner}/${repo}`,
+              event,
+              audit_actor: context.actor,
+
+              code_changes: codeChanges,
+              deployment: deploymentRecord,
+
+              release: release ? {
+                tag: release.tag_name,
+                name: release.name,
+                commit_sha: releaseCommitSha,
+                target_commitish: release.target_commitish,
+                artifact_version: release.tag_name,
+                published_at: release.published_at,
+                url: release.html_url,
+                assets: (release.assets || []).map(a => ({
+                  name: a.name,
+                  size_bytes: a.size,
+                  download_url: a.browser_download_url
+                }))
+              } : null,
+
+              approvals,
+              testing_and_quality: testingAndQuality,
+              infrastructure,
+              failures,
+
+              workflow: {
+                name: run?.name || context.workflow,
+                run_id: run?.id || context.runId,
+                url: run?.html_url ||
+                  `${server}/${owner}/${repo}/actions/runs/${context.runId}`,
+                status: run?.status || 'not-applicable',
+                conclusion: run?.conclusion || 'not-provided',
+                started_at: run?.run_started_at || null,
+                updated_at: run?.updated_at || null,
+                source_actor: run?.actor?.login || null,
+                triggering_actor: run?.triggering_actor?.login || null
+              },
+
+              source_artifacts: artifacts
+            };
+
+            // Save machine-readable audit evidence.
             fs.writeFileSync(
               'audit-log.json',
               JSON.stringify(record, null, 2) + '\n'
             );
 
-            // Add a readable audit report to the GitHub Actions run summary.
+            // Create a readable GitHub Actions run summary.
             await core.summary
-              // Add a heading to the summary page.
               .addHeading('GitHub Actions Audit Record')
-
-              // Display the audit fields in a table.
               .addTable([
-                // Define the table column headings.
-                [{data: 'Field', header: true}, {data: 'Value', header: true}],
-
-                // Display the repository name.
+                [{data: 'Field', header: true},
+                 {data: 'Value', header: true}],
                 ['Repository', record.repository],
-
-                // Display the monitored workflow name.
-                ['Workflow', record.workflow_name],
-
-                // Display the monitored or manual audit run ID.
-                ['Run ID', String(record.workflow_run_id)],
-
-                // Display the associated actor.
-                ['Actor', record.actor],
-
-                // Display the source branch.
-                ['Branch', record.branch],
-
-                // Display the associated commit SHA.
-                ['Commit SHA', record.commit_sha],
-
-                // Display the workflow conclusion or manual-audit label.
-                ['Conclusion', record.conclusion],
-
-                // Display when the audit record was created.
+                ['Event', event],
+                ['Audit actor', context.actor],
+                ['Branch', branch || 'N/A'],
+                ['Commit SHA', commitSha || 'N/A'],
+                ['Pull request', pr?.number ?? 'N/A'],
+                ['Merged', pr ? String(pr.merged) : 'N/A'],
+                ['Release tag', release?.tag_name || 'N/A'],
+                ['Release commit', releaseCommitSha || 'N/A'],
+                ['Deployment environment',
+                  deploymentRecord?.environment || 'N/A'],
+                ['Deployment status',
+                  deploymentRecord?.status || 'N/A'],
+                ['Coverage percentage',
+                  coverage.coverage_percentage == null
+                    ? 'Not available'
+                    : `${coverage.coverage_percentage}%`],
+                ['Quality jobs', String(qualityJobs.length)],
+                ['Terraform jobs', String(terraformJobs.length)],
+                ['Failed/cancelled jobs', String(failedJobs.length)],
+                ['Failed/cancelled steps', String(failedSteps.length)],
+                ['Source artifacts', String(artifacts.length)],
                 ['Recorded at (UTC)', record.recorded_at]
               ])
-
-              // Publish the report on the workflow run's Summary page.
+              .addHeading('Audit Evidence')
+              .addCodeBlock(JSON.stringify({
+                code_changes: codeChanges,
+                deployment: deploymentRecord,
+                release: record.release,
+                approvals,
+                testing_and_quality: testingAndQuality,
+                infrastructure,
+                failures
+              }, null, 2), 'json')
               .write();
 
-            // Write an informational message to the step logs.
-            core.info('Audit record generated.');
+            core.info(`Audit record generated for ${event}.`);
 
-      # Upload the JSON audit record so it can be downloaded later.
+      # ------------------------------------------------------
+      # 3.4 Upload the audit record for later review.
+      # ------------------------------------------------------
       - name: Upload audit log
-
-        # Use the official GitHub artifact upload action.
         uses: actions/upload-artifact@v4
-
-        # Configure the artifact upload.
         with:
-          # Give each artifact a name based on the audit workflow run ID.
           name: audit-log-${{ github.run_id }}
-
-          # Specify the JSON file created in the previous step.
           path: audit-log.json
-
-          # Retain the uploaded artifact for 90 days.
           retention-days: 90
-
-          # Fail the step if the JSON file is missing.
           if-no-files-found: error
