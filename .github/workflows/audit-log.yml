@@ -1,77 +1,163 @@
 
+# Name displayed in the GitHub Actions tab.
 name: GitHub Actions Audit Log
 
+# Define when this audit workflow should run.
 on:
-  # Record completion of the Python CI workflow
+  # Automatically run after the Python Hello World CI workflow completes.
   workflow_run:
+    # The exact name of the workflow being monitored.
     workflows:
       - Python Hello World CI
+
+    # Run after the monitored workflow reaches a completed state,
+    # whether it succeeded, failed, or was cancelled.
     types:
       - completed
 
-  # Allow manual execution
+  # Allow an authorized user to start the audit workflow manually.
   workflow_dispatch:
 
+# Grant only the permissions required by this workflow.
 permissions:
+  # Allow reading workflow run details through the GitHub API.
   actions: read
+
+  # Allow checking out or reading repository contents if needed.
   contents: read
 
+# Define the jobs executed by this workflow.
 jobs:
+  # Job identifier used internally by GitHub Actions.
   audit:
+    # Friendly name displayed in the Actions run page.
     name: Generate Workflow Audit Record
+
+    # Use a GitHub-hosted Ubuntu runner.
     runs-on: ubuntu-latest
 
+    # Define the steps that generate and save the audit record.
     steps:
+      # Create a JSON audit record and display its details in the run summary.
       - name: Create audit record
+
+        # Use GitHub's JavaScript scripting action.
         uses: actions/github-script@v7
+
+        # Pass the JavaScript script to the action.
         with:
           script: |
+            // Import Node.js file-system functions to write the audit JSON file.
             const fs = require('fs');
 
+            // Get the completed workflow run details when triggered by workflow_run.
+            // This value is undefined for a manual workflow_dispatch run.
             const run = context.payload.workflow_run;
+
+            // Identify whether the workflow was started manually.
             const manual = context.eventName === 'workflow_dispatch';
 
+            // Build the audit record using available workflow metadata.
             const record = {
+              // Record when this audit entry was generated in UTC.
               recorded_at: new Date().toISOString(),
+
+              // Record the repository owner and repository name.
               repository: `${context.repo.owner}/${context.repo.repo}`,
+
+              // Record the event that triggered this audit workflow.
               event: context.eventName,
+
+              // Record the monitored workflow name, or this workflow's name as a fallback.
               workflow_name: run?.name || context.workflow,
+
+              // Record the monitored run ID, or the current audit run ID for manual runs.
               workflow_run_id: run?.id || context.runId,
+
+              // Record the URL of the monitored workflow run when available.
               workflow_run_url: run?.html_url || '',
+
+              // Record the user associated with the monitored run, when available.
               actor: run?.actor?.login || context.actor,
+
+              // Record who initiated the monitored run, when available.
               triggering_actor: run?.triggering_actor?.login || context.actor,
+
+              // Record the source branch, falling back to the current ref.
               branch: run?.head_branch ||
                 context.ref.replace('refs/heads/', ''),
+
+              // Record the commit SHA associated with the monitored run.
               commit_sha: run?.head_sha || context.sha,
+
+              // Record the monitored workflow result.
+              // For a manual audit, use a label rather than claiming CI succeeded.
               conclusion: run?.conclusion || 'manual-audit'
             };
 
+            // Write the audit record to a formatted JSON file.
             fs.writeFileSync(
               'audit-log.json',
               JSON.stringify(record, null, 2) + '\n'
             );
 
+            // Add a readable audit report to the GitHub Actions run summary.
             await core.summary
+              // Add a heading to the summary page.
               .addHeading('GitHub Actions Audit Record')
+
+              // Display the audit fields in a table.
               .addTable([
+                // Define the table column headings.
                 [{data: 'Field', header: true}, {data: 'Value', header: true}],
+
+                // Display the repository name.
                 ['Repository', record.repository],
+
+                // Display the monitored workflow name.
                 ['Workflow', record.workflow_name],
+
+                // Display the monitored or manual audit run ID.
                 ['Run ID', String(record.workflow_run_id)],
+
+                // Display the associated actor.
                 ['Actor', record.actor],
+
+                // Display the source branch.
                 ['Branch', record.branch],
+
+                // Display the associated commit SHA.
                 ['Commit SHA', record.commit_sha],
+
+                // Display the workflow conclusion or manual-audit label.
                 ['Conclusion', record.conclusion],
+
+                // Display when the audit record was created.
                 ['Recorded at (UTC)', record.recorded_at]
               ])
+
+              // Publish the report on the workflow run's Summary page.
               .write();
 
+            // Write an informational message to the step logs.
             core.info('Audit record generated.');
 
+      # Upload the JSON audit record so it can be downloaded later.
       - name: Upload audit log
+
+        # Use the official GitHub artifact upload action.
         uses: actions/upload-artifact@v4
+
+        # Configure the artifact upload.
         with:
+          # Give each artifact a name based on the audit workflow run ID.
           name: audit-log-${{ github.run_id }}
+
+          # Specify the JSON file created in the previous step.
           path: audit-log.json
+
+          # Retain the uploaded artifact for 90 days.
           retention-days: 90
+
+          # Fail the step if the JSON file is missing.
           if-no-files-found: error
