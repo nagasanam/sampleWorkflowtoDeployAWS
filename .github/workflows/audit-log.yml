@@ -1,14 +1,10 @@
 
-# ============================================================
-# GitHub Actions Audit Log
-# ============================================================
-name: GitHub Actions Audit Log
+# Python Audit Log Workflow with Pylint, Coverage, and Quality Gates
+name: Python Audit Log Workflow
 
-# ============================================================
-# 1. WORKFLOW TRIGGERS
-# ============================================================
+# Trigger the audit on code changes, pull requests, releases,
+# completion of Python CI, deployment status changes, or manual execution.
 on:
-  # Record pushes to important branches.
   push:
     branches:
       - main
@@ -16,494 +12,403 @@ on:
       - release
       - 'feature/**'
 
-  # Record pull request activity and merges.
   pull_request:
-    types:
-      - opened
-      - synchronize
-      - reopened
-      - closed
+    branches: [main]
+    types: [opened, synchronize, reopened, closed]
 
-  # Record published releases.
   release:
-    types:
-      - published
+    types: [published]
 
-  # Record completed CI workflows.
-  # Add your exact deployment/Terraform workflow names here
-  # when those workflows are created.
   workflow_run:
-    workflows:
-      - Python Hello World CI
-    types:
-      - completed
+    workflows: ["Python Hello World CI"]
+    types: [completed]
 
-  # Record deployment status changes.
   deployment_status:
 
-  # Permit manual execution.
   workflow_dispatch:
+    inputs:
+      wave_id:
+        description: "Deployment wave ID"
+        required: false
+        type: string
+      region:
+        description: "Deployment region"
+        required: false
+        type: string
+      environment:
+        description: "Deployment environment"
+        required: false
+        type: string
+      artifact_version:
+        description: "Artifact version"
+        required: false
+        type: string
+      terraform_plan_result:
+        description: "Terraform plan result"
+        required: false
+        type: string
+      terraform_apply_result:
+        description: "Terraform apply result"
+        required: false
+        type: string
+      approval_details:
+        description: "Approval details"
+        required: false
+        type: string
 
-# ============================================================
-# 2. PERMISSIONS
-# ============================================================
+# Allow read-only access to repository, workflow, and deployment information.
 permissions:
-  actions: read
   contents: read
-  pull-requests: read
+  actions: read
   deployments: read
+  pull-requests: read
 
-# ============================================================
-# 3. AUDIT JOB
-# ============================================================
 jobs:
   audit:
-    name: Generate Comprehensive Audit Record
+    name: Python Quality Gates and Audit
     runs-on: ubuntu-latest
 
     steps:
-      # ------------------------------------------------------
-      # 3.1 Download coverage evidence from the Python CI run.
-      # This expects the CI workflow to upload an artifact named
-      # python-coverage-report containing coverage.xml.
-      # ------------------------------------------------------
-      - name: Download Python CI coverage artifact
-        if: github.event_name == 'workflow_run'
-        uses: actions/download-artifact@v4
-        continue-on-error: true
+      # Check out the commit associated with the event.
+      # For workflow_run events, use the source CI commit.
+      - name: Checkout source code
+        uses: actions/checkout@v4
         with:
-          name: python-coverage-report
-          run-id: ${{ github.event.workflow_run.id }}
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-          path: ci-artifacts
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
 
-      # ------------------------------------------------------
-      # 3.2 Extract coverage percentage when coverage.xml exists.
-      # ------------------------------------------------------
-      - name: Extract coverage percentage
-        if: github.event_name == 'workflow_run'
+      # Install the Python version used for quality checks.
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      # Install the test, coverage, and static-analysis tools.
+      - name: Install Python quality tools
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install pytest pytest-cov pylint
+
+      # QUALITY GATE 1:
+      # Require a Pylint score of at least 8.0 out of 10.
+      # continue-on-error allows the audit record to be created even on failure.
+      - name: Run Pylint quality gate
+        id: pylint_gate
         continue-on-error: true
+        run: |
+          set -o pipefail
+          python -m pylint hello.py \
+            --score=yes \
+            --fail-under=8.0 2>&1 | tee pylint-report.txt
+
+      # Display a GitHub annotation when Pylint fails.
+      - name: Annotate Pylint result
+        if: steps.pylint_gate.outcome == 'failure'
+        run: |
+          echo "::error title=Pylint Quality Gate Failed::Pylint failed or its score is below 8.0/10. Review pylint-report.txt."
+
+      # QUALITY GATE 2:
+      # Run tests, generate coverage.xml, and require at least 80% coverage.
+      # Replace hello with your actual Python module name if needed.
+      - name: Run pytest coverage quality gate
+        id: coverage_gate
+        continue-on-error: true
+        run: |
+          python -m pytest -v \
+            --cov=hello \
+            --cov-report=term-missing \
+            --cov-report=xml:coverage.xml \
+            --cov-fail-under=80
+
+      # Display a GitHub annotation when tests fail or coverage is below 80%.
+      - name: Annotate coverage result
+        if: steps.coverage_gate.outcome == 'failure'
+        run: |
+          echo "::error title=Test Coverage Quality Gate Failed::Tests failed or coverage is below 80%. Review the pytest output."
+
+      # Generate the audit JSON using Python, not Node.js.
+      # Record actual step outcomes and read the reports for score and coverage.
+      - name: Generate audit record
+        if: always()
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          REPOSITORY: ${{ github.repository }}
+          ACTOR: ${{ github.actor }}
+          REF: ${{ github.ref }}
+          SHA: ${{ github.sha }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_NUMBER: ${{ github.run_number }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+          SERVER_URL: ${{ github.server_url }}
+          WORKFLOW_NAME: ${{ github.workflow }}
+          EVENT_PATH: ${{ github.event_path }}
+          PYLINT_OUTCOME: ${{ steps.pylint_gate.outcome }}
+          COVERAGE_OUTCOME: ${{ steps.coverage_gate.outcome }}
+          WAVE_ID: ${{ inputs.wave_id }}
+          REGION: ${{ inputs.region }}
+          ENVIRONMENT: ${{ inputs.environment }}
+          ARTIFACT_VERSION: ${{ inputs.artifact_version }}
+          TERRAFORM_PLAN_RESULT: ${{ inputs.terraform_plan_result }}
+          TERRAFORM_APPLY_RESULT: ${{ inputs.terraform_apply_result }}
+          APPROVAL_DETAILS: ${{ inputs.approval_details }}
         run: |
           python - <<'PY'
           import json
-          import pathlib
+          import os
+          import re
           import xml.etree.ElementTree as ET
+          from datetime import datetime, timezone
+          from pathlib import Path
 
-          result = {
-              "coverage_percentage": None,
-              "coverage_source": None
-          }
+          def read_event():
+              event_path = os.getenv("EVENT_PATH", "")
+              if event_path and Path(event_path).exists():
+                  with open(event_path, encoding="utf-8") as f:
+                      return json.load(f)
+              return {}
 
-          for path in pathlib.Path("ci-artifacts").rglob("coverage.xml"):
+          def get_pylint_score():
+              report = Path("pylint-report.txt")
+              if not report.exists():
+                  return None
+              content = report.read_text(encoding="utf-8", errors="replace")
+              match = re.search(
+                  r"Your code has been rated at\s+(-?[\d.]+)/10",
+                  content
+              )
+              return float(match.group(1)) if match else None
+
+          def get_coverage():
+              report = Path("coverage.xml")
+              if not report.exists():
+                  return None
               try:
-                  root = ET.parse(path).getroot()
-                  rate = root.attrib.get("line-rate")
+                  root = ET.parse(report).getroot()
+                  line_rate = root.attrib.get("line-rate")
+                  return round(float(line_rate) * 100, 2) if line_rate else None
+              except (ET.ParseError, ValueError):
+                  return None
 
-                  if rate is not None:
-                      result["coverage_percentage"] = round(
-                          float(rate) * 100, 2
-                      )
-                      result["coverage_source"] = str(path)
-                      break
-              except (ET.ParseError, OSError, ValueError):
-                  continue
+          payload = read_event()
+          pr = payload.get("pull_request") or {}
+          release = payload.get("release") or {}
+          source_run = payload.get("workflow_run") or {}
+          deployment = payload.get("deployment") or {}
+          deployment_status = payload.get("deployment_status") or {}
 
-          pathlib.Path("coverage-summary.json").write_text(
-              json.dumps(result, indent=2) + "\n",
-              encoding="utf-8"
+          pylint_outcome = os.getenv("PYLINT_OUTCOME", "unknown")
+          coverage_outcome = os.getenv("COVERAGE_OUTCOME", "unknown")
+          pylint_score = get_pylint_score()
+          coverage_percent = get_coverage()
+
+          # Mark each gate according to its configured threshold and actual result.
+          pylint_passed = (
+              pylint_outcome == "success"
+              and pylint_score is not None
+              and pylint_score >= 8.0
+          )
+          coverage_passed = (
+              coverage_outcome == "success"
+              and coverage_percent is not None
+              and coverage_percent >= 80.0
           )
 
-          print(json.dumps(result, indent=2))
-          PY
+          quality_passed = pylint_passed and coverage_passed
 
-      # ------------------------------------------------------
-      # 3.3 Collect audit evidence from GitHub APIs and events.
-      # ------------------------------------------------------
-      - name: Collect audit evidence
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const fs = require('fs');
+          run_url = (
+              f"{os.getenv('SERVER_URL')}/{os.getenv('REPOSITORY')}"
+              f"/actions/runs/{os.getenv('RUN_ID')}"
+          )
 
-            const p = context.payload;
-            const event = context.eventName;
-            const owner = context.repo.owner;
-            const repo = context.repo.repo;
-            const server = context.serverUrl;
+          audit = {
+              "audit_timestamp": datetime.now(timezone.utc).isoformat(),
+              "repository": os.getenv("REPOSITORY"),
+              "event_name": os.getenv("EVENT_NAME"),
+              "actor": os.getenv("ACTOR"),
+              "workflow_name": os.getenv("WORKFLOW_NAME"),
+              "run_id": os.getenv("RUN_ID"),
+              "run_number": os.getenv("RUN_NUMBER"),
+              "run_attempt": os.getenv("RUN_ATTEMPT"),
+              "run_url": run_url,
+              "ref": os.getenv("REF"),
+              "commit_sha": os.getenv("SHA"),
 
-            const run = p.workflow_run || null;
-            const pr = p.pull_request || null;
-            const release = p.release || null;
+              "pull_request": {
+                  "number": pr.get("number"),
+                  "title": pr.get("title"),
+                  "merged": pr.get("merged"),
+                  "merge_commit_sha": pr.get("merge_commit_sha"),
+                  "url": pr.get("html_url"),
+              } if pr else None,
 
-            const deployment =
-              p.deployment ||
-              p.deployment_status?.deployment ||
-              null;
+              "release": {
+                  "tag": release.get("tag_name"),
+                  "published_at": release.get("published_at"),
+                  "url": release.get("html_url"),
+              } if release else None,
 
-            const deploymentStatus = p.deployment_status || null;
+              "source_workflow": {
+                  "name": source_run.get("name"),
+                  "run_id": source_run.get("id"),
+                  "head_branch": source_run.get("head_branch"),
+                  "head_sha": source_run.get("head_sha"),
+                  "conclusion": source_run.get("conclusion"),
+                  "url": source_run.get("html_url"),
+              } if source_run else None,
 
-            // Read coverage collected by the previous step.
-            let coverage = {
-              coverage_percentage: null,
-              coverage_source: null
-            };
-
-            if (fs.existsSync('coverage-summary.json')) {
-              try {
-                coverage = JSON.parse(
-                  fs.readFileSync('coverage-summary.json', 'utf8')
-                );
-              } catch (e) {
-                core.warning(`Could not read coverage summary: ${e.message}`);
-              }
-            }
-
-            // ------------------------------------------------
-            // CODE CHANGES: push commits and pull request commits
-            // ------------------------------------------------
-            let commits = (p.commits || []).map(c => ({
-              sha: c.id,
-              message: c.message,
-              author: c.author?.name || 'Unknown'
-            }));
-
-            if (pr?.number) {
-              try {
-                const result = await github.rest.pulls.listCommits({
-                  owner,
-                  repo,
-                  pull_number: pr.number,
-                  per_page: 100
-                });
-
-                commits = result.data.map(c => ({
-                  sha: c.sha,
-                  message: c.commit.message,
-                  author: c.author?.login ||
-                    c.commit.author?.name || 'Unknown'
-                }));
-              } catch (e) {
-                core.warning(`Could not retrieve PR commits: ${e.message}`);
-              }
-            }
-
-            // ------------------------------------------------
-            // RELEASE TRACEABILITY: resolve tag to commit SHA
-            // ------------------------------------------------
-            let releaseCommitSha = null;
-
-            if (release?.tag_name) {
-              try {
-                const result = await github.rest.repos.getCommit({
-                  owner,
-                  repo,
-                  ref: release.tag_name
-                });
-
-                releaseCommitSha = result.data.sha;
-              } catch (e) {
-                core.warning(`Could not resolve release tag: ${e.message}`);
-              }
-            }
-
-            // ------------------------------------------------
-            // WORKFLOW RESULTS: jobs, timestamps and failed steps
-            // ------------------------------------------------
-            let jobs = [];
-            let artifacts = [];
-
-            if (run?.id) {
-              try {
-                const result =
-                  await github.rest.actions.listJobsForWorkflowRun({
-                    owner,
-                    repo,
-                    run_id: run.id,
-                    per_page: 100
-                  });
-
-                jobs = result.data.jobs.map(j => ({
-                  job_name: j.name,
-                  status: j.status,
-                  conclusion: j.conclusion,
-                  started_at: j.started_at,
-                  completed_at: j.completed_at,
-                  job_url: j.html_url,
-                  failed_steps: (j.steps || [])
-                    .filter(s =>
-                      s.conclusion === 'failure' ||
-                      s.conclusion === 'cancelled'
-                    )
-                    .map(s => ({
-                      name: s.name,
-                      conclusion: s.conclusion,
-                      number: s.number
-                    }))
-                }));
-              } catch (e) {
-                core.warning(`Could not retrieve jobs: ${e.message}`);
-              }
-
-              try {
-                const result =
-                  await github.rest.actions.listWorkflowRunArtifacts({
-                    owner,
-                    repo,
-                    run_id: run.id,
-                    per_page: 100
-                  });
-
-                artifacts = result.data.artifacts.map(a => ({
-                  name: a.name,
-                  size_bytes: a.size_in_bytes,
-                  expired: a.expired,
-                  created_at: a.created_at
-                }));
-              } catch (e) {
-                core.warning(`Could not retrieve artifacts: ${e.message}`);
-              }
-            }
-
-            // Classify jobs using their configured names.
-            const qualityJobs = jobs.filter(j =>
-              /test|coverage|pylint|lint|quality|security|build/i
-                .test(j.job_name)
-            );
-
-            const terraformJobs = jobs.filter(j =>
-              /terraform.*(plan|apply)|(plan|apply).*terraform/i
-                .test(j.job_name)
-            );
-
-            const failedJobs = jobs.filter(j =>
-              j.conclusion === 'failure' ||
-              j.conclusion === 'cancelled'
-            );
-
-            const failedSteps = jobs.flatMap(j =>
-              j.failed_steps.map(s => ({
-                job: j.job_name,
-                job_url: j.job_url,
-                step: s.name,
-                conclusion: s.conclusion
-              }))
-            );
-
-            // ------------------------------------------------
-            // CODE CHANGE METADATA
-            // ------------------------------------------------
-            const branch =
-              run?.head_branch ||
-              pr?.head?.ref ||
-              (p.ref || context.ref).replace('refs/heads/', '');
-
-            const commitSha =
-              run?.head_sha ||
-              pr?.head?.sha ||
-              p.after ||
-              context.sha;
-
-            const codeChanges = {
-              branch,
-              commit_sha: commitSha,
-              before_sha: p.before || null,
-              after_sha: p.after || null,
-              commits,
-              push_actor: p.pusher?.name || null,
-              pull_request: pr ? {
-                number: pr.number,
-                title: pr.title,
-                author: pr.user?.login || null,
-                state: pr.state,
-                merged: pr.merged,
-                merged_at: pr.merged_at || null,
-                merged_by: pr.merged_by?.login || null,
-                merge_commit_sha: pr.merge_commit_sha || null,
-                url: pr.html_url
-              } : null
-            };
-
-            // ------------------------------------------------
-            // DEPLOYMENT TRACKING
-            // Region and artifact version must be supplied by
-            // a deployment workflow; GitHub does not guarantee
-            // those values in deployment event payloads.
-            // ------------------------------------------------
-            const deploymentRecord = deployment ? {
-              deployment_id: deployment.id,
-              environment: deployment.environment || null,
-              ref: deployment.ref || null,
-              commit_sha: deployment.sha || null,
-              created_at: deployment.created_at || null,
-              status: deploymentStatus?.state || null,
-              status_updated_at: deploymentStatus?.updated_at || null,
-              status_description: deploymentStatus?.description || null,
-              status_creator: deploymentStatus?.creator?.login || null,
-              region: null,
-              artifact_version: null
-            } : null;
-
-            // ------------------------------------------------
-            // TESTING, QUALITY GATES AND INFRASTRUCTURE
-            // These job results are available only for the
-            // monitored source workflow run.
-            // ------------------------------------------------
-            const testingAndQuality = {
-              source_workflow: run?.name || null,
-              overall_ci_result: run?.conclusion || null,
-              jobs: qualityJobs,
-              coverage_percentage: coverage.coverage_percentage,
-              coverage_source: coverage.coverage_source,
-              quality_gate_outcome:
-                qualityJobs.length > 0
-                  ? qualityJobs.map(j => ({
-                      job: j.job_name,
-                      conclusion: j.conclusion
-                    }))
-                  : null
-            };
-
-            const infrastructure = {
-              terraform_jobs: terraformJobs,
-              plan_result: null,
-              apply_result: null,
-              evidence_artifacts: artifacts.filter(a =>
-                /terraform|plan|apply|deployment|evidence/i.test(a.name)
-              ),
-              note:
-                'Actual plan/apply results require Terraform workflow outputs or artifacts.'
-            };
-
-            // ------------------------------------------------
-            // FAILURE TRACKING
-            // ------------------------------------------------
-            const failures = {
-              failed_or_cancelled_jobs: failedJobs,
-              failed_or_cancelled_steps: failedSteps,
-              detail_note:
-                'Job links provide access to console logs. Full error messages are not automatically copied into this JSON record.'
-            };
-
-            // ------------------------------------------------
-            // APPROVAL TRACKING
-            // A deployment status creator is not necessarily
-            // the person who approved a protected environment.
-            // ------------------------------------------------
-            const approvals = {
-              environment: deployment?.environment || null,
-              status_creator: deploymentStatus?.creator?.login || null,
-              deployment_status: deploymentStatus?.state || null,
-              approver: null,
-              approval_timestamp: null,
-              note:
-                'Populate approver and approval timestamp from actual protected-environment approval evidence.'
-            };
-
-            // ------------------------------------------------
-            // COMPLETE AUDIT RECORD
-            // ------------------------------------------------
-            const record = {
-              recorded_at: new Date().toISOString(),
-              repository: `${owner}/${repo}`,
-              event,
-              audit_actor: context.actor,
-
-              code_changes: codeChanges,
-              deployment: deploymentRecord,
-
-              release: release ? {
-                tag: release.tag_name,
-                name: release.name,
-                commit_sha: releaseCommitSha,
-                target_commitish: release.target_commitish,
-                artifact_version: release.tag_name,
-                published_at: release.published_at,
-                url: release.html_url,
-                assets: (release.assets || []).map(a => ({
-                  name: a.name,
-                  size_bytes: a.size,
-                  download_url: a.browser_download_url
-                }))
-              } : null,
-
-              approvals,
-              testing_and_quality: testingAndQuality,
-              infrastructure,
-              failures,
-
-              workflow: {
-                name: run?.name || context.workflow,
-                run_id: run?.id || context.runId,
-                url: run?.html_url ||
-                  `${server}/${owner}/${repo}/actions/runs/${context.runId}`,
-                status: run?.status || 'not-applicable',
-                conclusion: run?.conclusion || 'not-provided',
-                started_at: run?.run_started_at || null,
-                updated_at: run?.updated_at || null,
-                source_actor: run?.actor?.login || null,
-                triggering_actor: run?.triggering_actor?.login || null
+              "deployment": {
+                  "environment": (
+                      os.getenv("ENVIRONMENT")
+                      or deployment.get("environment")
+                  ),
+                  "region": os.getenv("REGION") or None,
+                  "deployment_id": deployment.get("id"),
+                  "status": deployment_status.get("state"),
+                  "created_at": deployment.get("created_at"),
+                  "status_timestamp": deployment_status.get("created_at"),
               },
 
-              source_artifacts: artifacts
-            };
+              "release_traceability": {
+                  "wave_id": os.getenv("WAVE_ID") or None,
+                  "artifact_version": (
+                      os.getenv("ARTIFACT_VERSION")
+                      or release.get("tag_name")
+                      or None
+                  ),
+                  "commit_sha": os.getenv("SHA"),
+              },
 
-            // Save machine-readable audit evidence.
-            fs.writeFileSync(
-              'audit-log.json',
-              JSON.stringify(record, null, 2) + '\n'
-            );
+              "approvals": {
+                  "supplied_details": os.getenv("APPROVAL_DETAILS") or None,
+                  "note": (
+                      "Supplied details are not independently verified. "
+                      "Retrieve actual approver records from GitHub."
+                  ),
+              },
 
-            // Create a readable GitHub Actions run summary.
-            await core.summary
-              .addHeading('GitHub Actions Audit Record')
-              .addTable([
-                [{data: 'Field', header: true},
-                 {data: 'Value', header: true}],
-                ['Repository', record.repository],
-                ['Event', event],
-                ['Audit actor', context.actor],
-                ['Branch', branch || 'N/A'],
-                ['Commit SHA', commitSha || 'N/A'],
-                ['Pull request', pr?.number ?? 'N/A'],
-                ['Merged', pr ? String(pr.merged) : 'N/A'],
-                ['Release tag', release?.tag_name || 'N/A'],
-                ['Release commit', releaseCommitSha || 'N/A'],
-                ['Deployment environment',
-                  deploymentRecord?.environment || 'N/A'],
-                ['Deployment status',
-                  deploymentRecord?.status || 'N/A'],
-                ['Coverage percentage',
-                  coverage.coverage_percentage == null
-                    ? 'Not available'
-                    : `${coverage.coverage_percentage}%`],
-                ['Quality jobs', String(qualityJobs.length)],
-                ['Terraform jobs', String(terraformJobs.length)],
-                ['Failed/cancelled jobs', String(failedJobs.length)],
-                ['Failed/cancelled steps', String(failedSteps.length)],
-                ['Source artifacts', String(artifacts.length)],
-                ['Recorded at (UTC)', record.recorded_at]
-              ])
-              .addHeading('Audit Evidence')
-              .addCodeBlock(JSON.stringify({
-                code_changes: codeChanges,
-                deployment: deploymentRecord,
-                release: record.release,
-                approvals,
-                testing_and_quality: testingAndQuality,
-                infrastructure,
-                failures
-              }, null, 2), 'json')
-              .write();
+              "testing_and_quality": {
+                  "pylint": {
+                      "outcome": pylint_outcome,
+                      "score": pylint_score,
+                      "minimum_score": 8.0,
+                      "quality_gate": "passed" if pylint_passed else "failed",
+                  },
+                  "pytest_coverage": {
+                      "outcome": coverage_outcome,
+                      "coverage_percent": coverage_percent,
+                      "minimum_percent": 80.0,
+                      "quality_gate": (
+                          "passed" if coverage_passed else "failed"
+                      ),
+                  },
+                  "overall_quality_gate": (
+                      "passed" if quality_passed else "failed"
+                  ),
+              },
 
-            core.info(`Audit record generated for ${event}.`);
+              "infrastructure": {
+                  "terraform_plan_result": (
+                      os.getenv("TERRAFORM_PLAN_RESULT") or None
+                  ),
+                  "terraform_apply_result": (
+                      os.getenv("TERRAFORM_APPLY_RESULT") or None
+                  ),
+              },
 
-      # ------------------------------------------------------
-      # 3.4 Upload the audit record for later review.
-      # ------------------------------------------------------
-      - name: Upload audit log
+              "final_outcome": (
+                  "quality-gates-passed"
+                  if quality_passed
+                  else "quality-gates-failed"
+              ),
+          }
+
+          # Write the JSON audit artifact for review and retention.
+          with open("audit-log.json", "w", encoding="utf-8") as f:
+              json.dump(audit, f, indent=2)
+
+          print("::notice title=Audit Record::audit-log.json generated.")
+
+          if not pylint_passed:
+              print("::warning title=Pylint Gate::Pylint quality gate did not pass.")
+
+          if not coverage_passed:
+              print("::warning title=Coverage Gate::Coverage quality gate did not pass.")
+
+          if quality_passed:
+              print("::notice title=Quality Gates Passed::Pylint and coverage meet their thresholds.")
+          else:
+              print("::error title=Quality Gates Failed::At least one quality gate failed.")
+          PY
+
+      # Publish a summary visible on the Actions run page.
+      - name: Publish quality gate summary
+        if: always()
+        env:
+          PYLINT_OUTCOME: ${{ steps.pylint_gate.outcome }}
+          COVERAGE_OUTCOME: ${{ steps.coverage_gate.outcome }}
+        run: |
+          # Read measured values from reports and show them in the summary.
+          python - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import re
+          import xml.etree.ElementTree as ET
+          from pathlib import Path
+
+          print("# Python Quality Gate Summary\n")
+          print("| Check | Result | Measured value | Threshold |")
+          print("|---|---|---:|---:|")
+
+          pylint_score = "unavailable"
+          report = Path("pylint-report.txt")
+          if report.exists():
+              match = re.search(
+                  r"Your code has been rated at\s+(-?[\d.]+)/10",
+                  report.read_text(encoding="utf-8", errors="replace")
+              )
+              if match:
+                  pylint_score = match.group(1) + "/10"
+
+          coverage = "unavailable"
+          report = Path("coverage.xml")
+          if report.exists():
+              try:
+                  root = ET.parse(report).getroot()
+                  coverage = f"{float(root.attrib['line-rate']) * 100:.2f}%"
+              except (ET.ParseError, KeyError, ValueError):
+                  pass
+
+          print(f"| Pylint | {__import__('os').environ.get('PYLINT_OUTCOME')} | {pylint_score} | 8.0/10 |")
+          print(f"| Pytest coverage | {__import__('os').environ.get('COVERAGE_OUTCOME')} | {coverage} | 80% |")
+          PY
+
+      # Upload audit and quality reports even if a quality gate fails.
+      - name: Upload audit and quality reports
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: audit-log-${{ github.run_id }}
-          path: audit-log.json
+          name: python-audit-${{ github.run_id }}
+          path: |
+            audit-log.json
+            pylint-report.txt
+            coverage.xml
+          if-no-files-found: warn
           retention-days: 90
-          if-no-files-found: error
+
+      # ENFORCE THE QUALITY GATES:
+      # Earlier steps use continue-on-error so reports can still be generated.
+      # This final step fails the job if either quality check failed.
+      - name: Enforce quality gates
+        if: always()
+        env:
+          PYLINT_OUTCOME: ${{ steps.pylint_gate.outcome }}
+          COVERAGE_OUTCOME: ${{ steps.coverage_gate.outcome }}
+        run: |
+          if [ "$PYLINT_OUTCOME" != "success" ]; then
+            echo "::error title=Pylint Gate Failed::Required Pylint quality gate did not pass."
+            exit 1
+          fi
+
+          if [ "$COVERAGE_OUTCOME" != "success" ]; then
+            echo "::error title=Coverage Gate Failed::Required test coverage quality gate did not pass."
+            exit 1
+          fi
+
+          echo "::notice title=Quality Gates Passed::Pylint score and test coverage meet the required thresholds."
