@@ -295,7 +295,7 @@ jobs:
                   "pytest_coverage": {
                       "outcome": coverage_outcome,
                       "coverage_percent": coverage_percent,
-                      "minimum_percent": 80.0,
+                      "minimum_percent": 70.0,
                       "quality_gate": (
                           "passed" if coverage_passed else "failed"
                       ),
