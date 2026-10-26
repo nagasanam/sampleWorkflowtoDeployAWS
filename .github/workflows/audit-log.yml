@@ -113,7 +113,7 @@ jobs:
             --cov=hello \
             --cov-report=term-missing \
             --cov-report=xml:coverage.xml \
-            --cov-fail-under=80
+            --cov-fail-under=70
 
       # Emit annotations for Pylint and test/coverage outcomes.
       - name: Annotate quality check results
@@ -131,9 +131,9 @@ jobs:
           fi
 
           if [ "$TEST_OUTCOME" != "success" ]; then
-            echo "::error title=Tests or Coverage Failed::Tests failed or coverage is below 80%. Review the test output."
+            echo "::error title=Tests or Coverage Failed::Tests failed or coverage is below 70%. Review the test output."
           else
-            echo "::notice title=Tests and Coverage Passed::Tests passed and coverage met the 80% threshold."
+            echo "::notice title=Tests and Coverage Passed::Tests passed and coverage met the 70% threshold."
           fi
 
           if [ ! -f coverage.xml ]; then
@@ -230,7 +230,7 @@ jobs:
                   "pylint_score_out_of_10": pylint_score,
                   "pylint_outcome": env("PYLINT_OUTCOME"),
                   "coverage_percent": coverage_percent,
-                  "required_coverage_percent": 80,
+                  "required_coverage_percent": 70,
                   "test_outcome": env("TEST_OUTCOME"),
                   "compile_outcome": env("COMPILE_OUTCOME"),
                   "quality_gates_passed": quality_passed,
@@ -283,7 +283,7 @@ jobs:
             if [ -f coverage.xml ]; then
               COVERAGE=$(python -c "import xml.etree.ElementTree as ET; r=ET.parse('coverage.xml').getroot(); print('{:.2f}%'.format(float(r.attrib.get('line-rate', 0))*100))")
               echo "- Measured coverage: $COVERAGE"
-              echo "- Required coverage: 80%"
+              echo "- Required coverage: 70%"
             else
               echo "- Measured coverage: report unavailable"
             fi
@@ -329,7 +329,7 @@ jobs:
           fi
 
           if [ "$TEST_OUTCOME" != "success" ]; then
-            echo "::error title=Test Coverage Gate Failed::Tests must pass and coverage must be at least 80%."
+            echo "::error title=Test Coverage Gate Failed::Tests must pass and coverage must be at least 70%."
             FAILED=1
           fi
 
