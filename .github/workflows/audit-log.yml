@@ -1,9 +1,9 @@
 
-# Python Audit Log Workflow with Pylint, Coverage, and Quality Gates
+# Python Audit Log Workflow with Quality Gates and Diagnostics
 name: Python Audit Log Workflow
 
-# Trigger the audit on code changes, pull requests, releases,
-# completion of Python CI, deployment status changes, or manual execution.
+# Run the audit on code changes, pull requests, releases, CI completion,
+# deployment status changes, or manual execution.
 on:
   push:
     branches:
@@ -19,6 +19,8 @@ on:
   release:
     types: [published]
 
+  # The workflow name must match the Python CI workflow exactly.
+  # This trigger requires this audit workflow to exist on the default branch.
   workflow_run:
     workflows: ["Python Hello World CI"]
     types: [completed]
@@ -56,7 +58,7 @@ on:
         required: false
         type: string
 
-# Allow read-only access to repository, workflow, and deployment information.
+# Read-only permissions for repository, workflow, and deployment data.
 permissions:
   contents: read
   actions: read
@@ -69,46 +71,42 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      # Check out the commit associated with the event.
-      # For workflow_run events, use the source CI commit.
+      # Check out the commit associated with the triggering event.
       - name: Checkout source code
         uses: actions/checkout@v4
         with:
           ref: ${{ github.event.workflow_run.head_sha || github.sha }}
 
-      # Install the Python version used for quality checks.
+      # Install Python for the quality checks and audit scripts.
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.12'
 
-      # Install the test, coverage, and static-analysis tools.
+      # Install pytest, coverage reporting, and Pylint.
       - name: Install Python quality tools
         run: |
           python -m pip install --upgrade pip
           python -m pip install pytest pytest-cov pylint
 
       # QUALITY GATE 1:
-      # Require a Pylint score of at least 8.0 out of 10.
-      # continue-on-error allows the audit record to be created even on failure.
+      # Require a Pylint score of at least 8.0/10.
+      # Preserve the job temporarily on failure so diagnostics and audit reports run.
       - name: Run Pylint quality gate
         id: pylint_gate
         continue-on-error: true
         run: |
           set -o pipefail
-          python -m pylint hello.py \
-            --score=yes \
-            --fail-under=8.0 2>&1 | tee pylint-report.txt
+          python -m pylint hello.py --score=yes --fail-under=8.0 2>&1 | tee pylint-report.txt
 
-      # Display a GitHub annotation when Pylint fails.
-      - name: Annotate Pylint result
+      # Show a GitHub error annotation if Pylint fails.
+      - name: Annotate Pylint failure
         if: steps.pylint_gate.outcome == 'failure'
         run: |
-          echo "::error title=Pylint Quality Gate Failed::Pylint failed or its score is below 8.0/10. Review pylint-report.txt."
+          echo "::error title=Pylint Quality Gate Failed::Pylint failed or the score is below 8.0/10. Review pylint-report.txt."
 
       # QUALITY GATE 2:
-      # Run tests, generate coverage.xml, and require at least 80% coverage.
-      # Replace hello with your actual Python module name if needed.
+      # Run tests, produce coverage.xml, and require at least 80% line coverage.
       - name: Run pytest coverage quality gate
         id: coverage_gate
         continue-on-error: true
@@ -119,14 +117,50 @@ jobs:
             --cov-report=xml:coverage.xml \
             --cov-fail-under=80
 
-      # Display a GitHub annotation when tests fail or coverage is below 80%.
-      - name: Annotate coverage result
+      # Highlight test failures or insufficient coverage.
+      - name: Annotate coverage failure
         if: steps.coverage_gate.outcome == 'failure'
         run: |
-          echo "::error title=Test Coverage Quality Gate Failed::Tests failed or coverage is below 80%. Review the pytest output."
+          echo "::error title=Coverage Quality Gate Failed::Tests failed, no tests were collected, or coverage is below 80%. Review the pytest logs."
 
-      # Generate the audit JSON using Python, not Node.js.
-      # Record actual step outcomes and read the reports for score and coverage.
+      # DIAGNOSTICS:
+      # Display the generated coverage percentage and report availability.
+      # This step runs even when pytest fails.
+      - name: Diagnose Python coverage failure
+        if: always()
+        run: |
+          echo "Checking pytest coverage output..."
+
+          if [ -f coverage.xml ]; then
+            python - <<'PY'
+          import xml.etree.ElementTree as ET
+
+          try:
+              root = ET.parse("coverage.xml").getroot()
+              line_rate = root.attrib.get("line-rate")
+              if line_rate is None:
+                  print("::warning title=Coverage Data Missing::coverage.xml has no line-rate value.")
+              else:
+                  coverage = float(line_rate) * 100
+                  print(f"Measured coverage: {coverage:.2f}%")
+                  if coverage < 80:
+                      print("::warning title=Coverage Below Threshold::Coverage is below the required 80%.")
+          except (ET.ParseError, ValueError) as exc:
+              print(f"::error title=Invalid Coverage Report::{exc}")
+          PY
+          else
+            echo "::warning title=Coverage Report Missing::coverage.xml was not generated. Check test collection, imports, and pytest errors."
+          fi
+
+          if [ -f pylint-report.txt ]; then
+            echo "Pylint report:"
+            cat pylint-report.txt
+          else
+            echo "::warning title=Pylint Report Missing::pylint-report.txt was not generated."
+          fi
+
+      # Generate a structured JSON audit record using Python.
+      # Record actual quality-gate outcomes and any report values that exist.
       - name: Generate audit record
         if: always()
         env:
@@ -159,48 +193,41 @@ jobs:
           from datetime import datetime, timezone
           from pathlib import Path
 
-          def read_event():
-              event_path = os.getenv("EVENT_PATH", "")
-              if event_path and Path(event_path).exists():
-                  with open(event_path, encoding="utf-8") as f:
-                      return json.load(f)
-              return {}
+          # Read GitHub event metadata when available.
+          payload = {}
+          event_path = os.getenv("EVENT_PATH", "")
+          if event_path and Path(event_path).exists():
+              with open(event_path, encoding="utf-8") as f:
+                  payload = json.load(f)
 
-          def get_pylint_score():
-              report = Path("pylint-report.txt")
-              if not report.exists():
-                  return None
-              content = report.read_text(encoding="utf-8", errors="replace")
+          # Extract the Pylint score from the captured report.
+          pylint_score = None
+          pylint_report = Path("pylint-report.txt")
+          if pylint_report.exists():
               match = re.search(
                   r"Your code has been rated at\s+(-?[\d.]+)/10",
-                  content
+                  pylint_report.read_text(encoding="utf-8", errors="replace")
               )
-              return float(match.group(1)) if match else None
+              if match:
+                  pylint_score = float(match.group(1))
 
-          def get_coverage():
-              report = Path("coverage.xml")
-              if not report.exists():
-                  return None
+          # Extract line coverage from coverage.xml when it exists.
+          coverage_percent = None
+          coverage_report = Path("coverage.xml")
+          if coverage_report.exists():
               try:
-                  root = ET.parse(report).getroot()
-                  line_rate = root.attrib.get("line-rate")
-                  return round(float(line_rate) * 100, 2) if line_rate else None
+                  root = ET.parse(coverage_report).getroot()
+                  rate = root.attrib.get("line-rate")
+                  if rate is not None:
+                      coverage_percent = round(float(rate) * 100, 2)
               except (ET.ParseError, ValueError):
-                  return None
+                  pass
 
-          payload = read_event()
-          pr = payload.get("pull_request") or {}
-          release = payload.get("release") or {}
-          source_run = payload.get("workflow_run") or {}
-          deployment = payload.get("deployment") or {}
-          deployment_status = payload.get("deployment_status") or {}
-
+          # Mark a gate as passed only if its command succeeded and the
+          # expected measurement is available and meets the configured threshold.
           pylint_outcome = os.getenv("PYLINT_OUTCOME", "unknown")
           coverage_outcome = os.getenv("COVERAGE_OUTCOME", "unknown")
-          pylint_score = get_pylint_score()
-          coverage_percent = get_coverage()
 
-          # Mark each gate according to its configured threshold and actual result.
           pylint_passed = (
               pylint_outcome == "success"
               and pylint_score is not None
@@ -211,8 +238,13 @@ jobs:
               and coverage_percent is not None
               and coverage_percent >= 80.0
           )
-
           quality_passed = pylint_passed and coverage_passed
+
+          pr = payload.get("pull_request") or {}
+          release = payload.get("release") or {}
+          source_run = payload.get("workflow_run") or {}
+          deployment = payload.get("deployment") or {}
+          deployment_status = payload.get("deployment_status") or {}
 
           run_url = (
               f"{os.getenv('SERVER_URL')}/{os.getenv('REPOSITORY')}"
@@ -257,8 +289,7 @@ jobs:
 
               "deployment": {
                   "environment": (
-                      os.getenv("ENVIRONMENT")
-                      or deployment.get("environment")
+                      os.getenv("ENVIRONMENT") or deployment.get("environment")
                   ),
                   "region": os.getenv("REGION") or None,
                   "deployment_id": deployment.get("id"),
@@ -281,7 +312,7 @@ jobs:
                   "supplied_details": os.getenv("APPROVAL_DETAILS") or None,
                   "note": (
                       "Supplied details are not independently verified. "
-                      "Retrieve actual approver records from GitHub."
+                      "Retrieve actual approval records from GitHub."
                   ),
               },
 
@@ -295,10 +326,8 @@ jobs:
                   "pytest_coverage": {
                       "outcome": coverage_outcome,
                       "coverage_percent": coverage_percent,
-                      "minimum_percent": 70.0,
-                      "quality_gate": (
-                          "passed" if coverage_passed else "failed"
-                      ),
+                      "minimum_percent": 80.0,
+                      "quality_gate": "passed" if coverage_passed else "failed",
                   },
                   "overall_quality_gate": (
                       "passed" if quality_passed else "failed"
@@ -315,71 +344,71 @@ jobs:
               },
 
               "final_outcome": (
-                  "quality-gates-passed"
-                  if quality_passed
+                  "quality-gates-passed" if quality_passed
                   else "quality-gates-failed"
               ),
           }
 
-          # Write the JSON audit artifact for review and retention.
+          # Save the audit data even if a quality gate fails.
           with open("audit-log.json", "w", encoding="utf-8") as f:
               json.dump(audit, f, indent=2)
 
           print("::notice title=Audit Record::audit-log.json generated.")
 
           if not pylint_passed:
-              print("::warning title=Pylint Gate::Pylint quality gate did not pass.")
+              print("::warning title=Pylint Gate Failed::Check the score and pylint-report.txt.")
 
           if not coverage_passed:
-              print("::warning title=Coverage Gate::Coverage quality gate did not pass.")
+              print("::warning title=Coverage Gate Failed::Check test results and coverage.xml.")
 
           if quality_passed:
               print("::notice title=Quality Gates Passed::Pylint and coverage meet their thresholds.")
           else:
-              print("::error title=Quality Gates Failed::At least one quality gate failed.")
+              print("::error title=Quality Gates Failed::At least one required quality gate did not pass.")
           PY
 
-      # Publish a summary visible on the Actions run page.
+      # Publish a readable summary on the workflow run page.
       - name: Publish quality gate summary
         if: always()
         env:
           PYLINT_OUTCOME: ${{ steps.pylint_gate.outcome }}
           COVERAGE_OUTCOME: ${{ steps.coverage_gate.outcome }}
         run: |
-          # Read measured values from reports and show them in the summary.
           python - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import os
           import re
           import xml.etree.ElementTree as ET
           from pathlib import Path
 
-          print("# Python Quality Gate Summary\n")
-          print("| Check | Result | Measured value | Threshold |")
-          print("|---|---|---:|---:|")
-
+          # Read measured Pylint score if the report exists.
           pylint_score = "unavailable"
-          report = Path("pylint-report.txt")
-          if report.exists():
+          path = Path("pylint-report.txt")
+          if path.exists():
               match = re.search(
                   r"Your code has been rated at\s+(-?[\d.]+)/10",
-                  report.read_text(encoding="utf-8", errors="replace")
+                  path.read_text(encoding="utf-8", errors="replace")
               )
               if match:
                   pylint_score = match.group(1) + "/10"
 
+          # Read measured coverage percentage if the report exists.
           coverage = "unavailable"
-          report = Path("coverage.xml")
-          if report.exists():
+          path = Path("coverage.xml")
+          if path.exists():
               try:
-                  root = ET.parse(report).getroot()
+                  root = ET.parse(path).getroot()
                   coverage = f"{float(root.attrib['line-rate']) * 100:.2f}%"
               except (ET.ParseError, KeyError, ValueError):
                   pass
 
-          print(f"| Pylint | {__import__('os').environ.get('PYLINT_OUTCOME')} | {pylint_score} | 8.0/10 |")
-          print(f"| Pytest coverage | {__import__('os').environ.get('COVERAGE_OUTCOME')} | {coverage} | 80% |")
+          print("# Python Quality Gate Summary\n")
+          print("| Check | Command outcome | Measurement | Required |")
+          print("|---|---|---:|---:|")
+          print(f"| Pylint | {os.getenv('PYLINT_OUTCOME')} | {pylint_score} | 8.0/10 |")
+          print(f"| Pytest coverage | {os.getenv('COVERAGE_OUTCOME')} | {coverage} | 80% |")
           PY
 
-      # Upload audit and quality reports even if a quality gate fails.
+      # Upload audit and quality reports even when a gate fails.
       - name: Upload audit and quality reports
         if: always()
         uses: actions/upload-artifact@v4
@@ -392,9 +421,9 @@ jobs:
           if-no-files-found: warn
           retention-days: 90
 
-      # ENFORCE THE QUALITY GATES:
-      # Earlier steps use continue-on-error so reports can still be generated.
-      # This final step fails the job if either quality check failed.
+      # Final enforcement:
+      # Earlier quality-check steps preserve their reports on failure.
+      # This step makes the overall job fail if either required gate fails.
       - name: Enforce quality gates
         if: always()
         env:
@@ -402,13 +431,13 @@ jobs:
           COVERAGE_OUTCOME: ${{ steps.coverage_gate.outcome }}
         run: |
           if [ "$PYLINT_OUTCOME" != "success" ]; then
-            echo "::error title=Pylint Gate Failed::Required Pylint quality gate did not pass."
+            echo "::error title=Pylint Gate Failed::Pylint did not pass. Review the report and earlier logs."
             exit 1
           fi
 
           if [ "$COVERAGE_OUTCOME" != "success" ]; then
-            echo "::error title=Coverage Gate Failed::Required test coverage quality gate did not pass."
+            echo "::error title=Coverage Gate Failed::Tests failed or coverage is below 80%. Review the diagnostic output."
             exit 1
           fi
 
-          echo "::notice title=Quality Gates Passed::Pylint score and test coverage meet the required thresholds."
+          echo "::notice title=Quality Gates Passed::Pylint and coverage passed."
