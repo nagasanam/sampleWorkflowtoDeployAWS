@@ -65,10 +65,35 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+      # Check out the commit that triggered the audit.
       - name: Checkout source code
         uses: actions/checkout@v4
         with:
           ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+
+      # Display workflow and repository details.
+      - name: Display workflow diagnostics
+        run: |
+          echo "::group::Workflow Run Information"
+          echo "Repository: $GITHUB_REPOSITORY"
+          echo "Workflow: $GITHUB_WORKFLOW"
+          echo "Run ID: $GITHUB_RUN_ID"
+          echo "Run number: $GITHUB_RUN_NUMBER"
+          echo "Event: $GITHUB_EVENT_NAME"
+          echo "Ref: $GITHUB_REF"
+          echo "Commit: $GITHUB_SHA"
+          echo "Actor: $GITHUB_ACTOR"
+          echo "Runner OS: $RUNNER_OS"
+          echo "::endgroup::"
+
+          echo "::group::Repository Information"
+          pwd
+          git status --short
+          git log -1 --oneline
+          echo "Python files:"
+          find . -type f -name "*.py" \
+            -not -path "./.git/*" | sort
+          echo "::endgroup::"
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -77,74 +102,145 @@ jobs:
 
       - name: Install Python tools
         run: |
+          python --version
+          python -m pip --version
           python -m pip install --upgrade pip
           python -m pip install pytest pytest-cov pylint
+          echo "::group::Installed Packages"
+          python -m pip list
+          echo "::endgroup::"
 
+      # Compile Python files and preserve logs for later diagnostics.
       - name: Compile Python files
         id: compile
         continue-on-error: true
-        run: python -m compileall -q .
-
-      # Annotate Python compilation failures.
-      - name: Annotate compilation result
-        if: always()
-        env:
-          COMPILE_OUTCOME: ${{ steps.compile.outcome }}
         run: |
-          if [ "$COMPILE_OUTCOME" != "success" ]; then
-            echo "::error title=Python Compilation Failed::Python source files could not be compiled. Review the compilation step."
-          else
+          echo "Starting Python compilation..."
+          python -m compileall -q .
+          RESULT=$?
+
+          if [ "$RESULT" -eq 0 ]; then
             echo "::notice title=Compilation Passed::Python files compiled successfully."
+          else
+            echo "::error title=Compilation Failed::Review Python syntax errors in the log."
           fi
 
+          exit "$RESULT"
+
+      # Check whether pytest can discover the expected tests.
+      - name: Discover Python tests
+        id: discovery
+        continue-on-error: true
+        run: |
+          echo "::group::Test Discovery"
+          python -m pytest --collect-only -v
+          RESULT=$?
+          echo "Test discovery exit code: $RESULT"
+          echo "::endgroup::"
+
+          if [ "$RESULT" -ne 0 ]; then
+            echo "::warning title=Test Discovery Problem::Check test filenames, test functions, and import errors."
+          fi
+
+          exit "$RESULT"
+
+      # Enforce the configured Pylint score of 8.0/10.
       - name: Analyze Python code with Pylint
         id: pylint
         continue-on-error: true
         run: |
-          python -m pylint hello.py --score=yes --fail-under=8.0 \
-            2>&1 | tee pylint-report.txt
-          exit "${PIPESTATUS[0]}"
+          echo "Target: hello.py"
+          echo "Required Pylint score: 8.0/10"
 
+          set +e
+          python -m pylint hello.py \
+            --score=yes \
+            --fail-under=8.0 \
+            --output-format=text \
+            2>&1 | tee pylint-report.txt
+
+          RESULT=${PIPESTATUS[0]}
+          set -e
+
+          echo "Pylint exit code: $RESULT"
+
+          if [ "$RESULT" -ne 0 ]; then
+            echo "::warning title=Pylint Issues Detected::Review pylint-report.txt for code-quality issues."
+          fi
+
+          exit "$RESULT"
+
+      # Run tests and enforce at least 70% coverage.
       - name: Run Python tests and measure coverage
         id: tests
         continue-on-error: true
         run: |
+          echo "::group::Execute Tests and Coverage"
+          echo "Required coverage: 70%"
+
           python -m pytest -v \
+            --tb=long \
+            --durations=10 \
             --cov=hello \
             --cov-report=term-missing \
             --cov-report=xml:coverage.xml \
+            --cov-report=html:htmlcov \
             --cov-fail-under=70
 
-      # Emit annotations for Pylint and test/coverage outcomes.
-      - name: Annotate quality check results
+          RESULT=$?
+          echo "Test and coverage exit code: $RESULT"
+          echo "::endgroup::"
+
+          if [ -f coverage.xml ]; then
+            echo "::group::Coverage Details"
+            python -c "import xml.etree.ElementTree as ET; r=ET.parse('coverage.xml').getroot(); print('Measured coverage: {:.2f}%'.format(float(r.attrib.get('line-rate', 0))*100))"
+            echo "::endgroup::"
+          else
+            echo "::warning title=Coverage Report Missing::coverage.xml was not generated."
+          fi
+
+          exit "$RESULT"
+
+      # Add visually distinct GitHub Actions annotations.
+      - name: Annotate workflow results
         if: always()
         env:
+          COMPILE_OUTCOME: ${{ steps.compile.outcome }}
+          DISCOVERY_OUTCOME: ${{ steps.discovery.outcome }}
           PYLINT_OUTCOME: ${{ steps.pylint.outcome }}
           TEST_OUTCOME: ${{ steps.tests.outcome }}
         run: |
-          echo "::group::Quality Gate Annotations"
+          echo "::group::Workflow Annotations"
 
-          if [ "$PYLINT_OUTCOME" != "success" ]; then
-            echo "::error title=Pylint Quality Gate Failed::Pylint failed or its score is below 8.0/10. Review pylint-report.txt."
+          if [ "$COMPILE_OUTCOME" = "success" ]; then
+            echo "::notice title=Compilation Passed::Python compilation passed."
           else
-            echo "::notice title=Pylint Passed::Pylint passed with the configured threshold."
+            echo "::error title=Compilation Failed::Python compilation failed."
           fi
 
-          if [ "$TEST_OUTCOME" != "success" ]; then
-            echo "::error title=Tests or Coverage Failed::Tests failed or coverage is below 70%. Review the test output."
+          if [ "$DISCOVERY_OUTCOME" != "success" ]; then
+            echo "::warning title=Test Discovery Issue::Review test discovery output for missing tests or import errors."
+          fi
+
+          if [ "$PYLINT_OUTCOME" = "success" ]; then
+            echo "::notice title=Pylint Passed::Pylint met the 8.0/10 threshold."
           else
+            echo "::error title=Pylint Failed::Pylint failed or scored below 8.0/10."
+          fi
+
+          if [ "$TEST_OUTCOME" = "success" ]; then
             echo "::notice title=Tests and Coverage Passed::Tests passed and coverage met the 70% threshold."
+          else
+            echo "::error title=Tests or Coverage Failed::Tests failed or coverage is below 70%."
           fi
 
           if [ ! -f coverage.xml ]; then
-            echo "::warning title=Coverage Report Missing::coverage.xml was not generated. Check test collection, imports, and test execution."
-          else
-            python -c "import xml.etree.ElementTree as ET; r=ET.parse('coverage.xml').getroot(); print('Measured coverage: {:.2f}%'.format(float(r.attrib.get('line-rate', 0))*100))"
+            echo "::warning title=Coverage Report Missing::Coverage details are unavailable because coverage.xml was not generated."
           fi
 
           echo "::endgroup::"
 
-      # Produce a structured audit record even when quality checks fail.
+      # Generate the structured audit record, even when checks fail.
       - name: Generate audit record
         if: always()
         env:
@@ -156,9 +252,10 @@ jobs:
           RUN_ID: ${{ github.run_id }}
           RUN_NUMBER: ${{ github.run_number }}
           SERVER_URL: ${{ github.server_url }}
+          COMPILE_OUTCOME: ${{ steps.compile.outcome }}
+          DISCOVERY_OUTCOME: ${{ steps.discovery.outcome }}
           PYLINT_OUTCOME: ${{ steps.pylint.outcome }}
           TEST_OUTCOME: ${{ steps.tests.outcome }}
-          COMPILE_OUTCOME: ${{ steps.compile.outcome }}
           WAVE_ID: ${{ inputs.wave_id }}
           REGION: ${{ inputs.region }}
           TARGET_ENVIRONMENT: ${{ inputs.environment }}
@@ -200,10 +297,13 @@ jobs:
               except (ET.ParseError, ValueError):
                   pass
 
-          quality_passed = (
-              env("PYLINT_OUTCOME") == "success"
-              and env("TEST_OUTCOME") == "success"
-              and env("COMPILE_OUTCOME") == "success"
+          quality_passed = all(
+              env(key) == "success"
+              for key in (
+                  "COMPILE_OUTCOME",
+                  "PYLINT_OUTCOME",
+                  "TEST_OUTCOME",
+              )
           )
 
           record = {
@@ -227,12 +327,13 @@ jobs:
                   "artifact_version": env("ARTIFACT_VERSION"),
               },
               "testing_and_quality": {
+                  "compile_outcome": env("COMPILE_OUTCOME"),
+                  "test_discovery_outcome": env("DISCOVERY_OUTCOME"),
                   "pylint_score_out_of_10": pylint_score,
                   "pylint_outcome": env("PYLINT_OUTCOME"),
                   "coverage_percent": coverage_percent,
                   "required_coverage_percent": 70,
                   "test_outcome": env("TEST_OUTCOME"),
-                  "compile_outcome": env("COMPILE_OUTCOME"),
                   "quality_gates_passed": quality_passed,
               },
               "infrastructure": {
@@ -250,15 +351,18 @@ jobs:
           Path("audit.json").write_text(
               json.dumps(record, indent=2) + "\n"
           )
+          print(json.dumps(record, indent=2))
           print("Audit record generated: audit.json")
           PY
 
+      # Write a readable summary to the Actions run page.
       - name: Write workflow summary
         if: always()
         env:
+          COMPILE_OUTCOME: ${{ steps.compile.outcome }}
+          DISCOVERY_OUTCOME: ${{ steps.discovery.outcome }}
           PYLINT_OUTCOME: ${{ steps.pylint.outcome }}
           TEST_OUTCOME: ${{ steps.tests.outcome }}
-          COMPILE_OUTCOME: ${{ steps.compile.outcome }}
           COMMIT_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
           WAVE_ID: ${{ inputs.wave_id }}
           REGION: ${{ inputs.region }}
@@ -275,8 +379,9 @@ jobs:
             echo "- Actor: $GITHUB_ACTOR"
             echo "- Run ID: $GITHUB_RUN_ID"
             echo
-            echo "## Quality checks"
+            echo "## Quality Checks"
             echo "- Compilation: $COMPILE_OUTCOME"
+            echo "- Test discovery: $DISCOVERY_OUTCOME"
             echo "- Pylint: $PYLINT_OUTCOME"
             echo "- Tests and coverage: $TEST_OUTCOME"
 
@@ -289,26 +394,58 @@ jobs:
             fi
 
             echo
-            echo "## Traceability inputs"
+            echo "## Traceability Inputs"
             echo "- Wave ID: ${WAVE_ID:-Not supplied}"
             echo "- Region: ${REGION:-Not supplied}"
             echo "- Environment: ${TARGET_ENVIRONMENT:-Not supplied}"
             echo "- Artifact version: ${ARTIFACT_VERSION:-Not supplied}"
+
+            echo
+            echo "## Reports"
+            echo "- Audit record: audit.json"
+            echo "- Pylint report: pylint-report.txt"
+            echo "- Coverage XML: coverage.xml"
+            echo "- HTML coverage: htmlcov/"
           } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Upload audit and quality reports
+      # Print which reports exist and their sizes.
+      - name: Detailed diagnostic summary
+        if: always()
+        run: |
+          echo "::group::Generated Report Files"
+
+          for FILE in audit.json pylint-report.txt coverage.xml; do
+            if [ -f "$FILE" ]; then
+              ls -lh "$FILE"
+            else
+              echo "::warning title=Report Not Found::$FILE was not generated."
+            fi
+          done
+
+          if [ -d htmlcov ]; then
+            echo "HTML coverage files:"
+            find htmlcov -maxdepth 2 -type f | head -50
+          else
+            echo "::warning title=HTML Coverage Missing::htmlcov directory was not generated."
+          fi
+
+          echo "::endgroup::"
+
+      # Upload all available audit and quality reports.
+      - name: Upload audit and diagnostic reports
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: python-audit-and-quality-reports
           path: |
             audit.json
-            coverage.xml
             pylint-report.txt
+            coverage.xml
+            htmlcov/
           if-no-files-found: warn
           retention-days: 90
 
-      # Fail the workflow if any required quality gate fails.
+      # Fail the job when any required quality gate fails.
       - name: Enforce quality gates
         if: always()
         env:
@@ -334,7 +471,7 @@ jobs:
           fi
 
           if [ "$FAILED" -ne 0 ]; then
-            echo "::error title=Workflow Failed::One or more required quality gates failed."
+            echo "::error title=Workflow Failed::One or more required quality gates failed. Review the logs and uploaded reports."
             exit 1
           fi
 
