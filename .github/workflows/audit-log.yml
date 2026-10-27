@@ -67,12 +67,14 @@ jobs:
     steps:
       # Check out the commit that triggered the audit.
       - name: Checkout source code
+        id: checkout
         uses: actions/checkout@v4
         with:
           ref: ${{ github.event.workflow_run.head_sha || github.sha }}
 
       # Display workflow and repository details.
       - name: Display workflow diagnostics
+        id: diagnostics
         run: |
           echo "::group::Workflow Run Information"
           echo "Repository: $GITHUB_REPOSITORY"
@@ -96,11 +98,13 @@ jobs:
           echo "::endgroup::"
 
       - name: Set up Python
+        id: setup_python
         uses: actions/setup-python@v5
         with:
           python-version: '3.12'
 
       - name: Install Python tools
+        id: install_tools
         run: |
           python --version
           python -m pip --version
@@ -242,6 +246,7 @@ jobs:
 
       # Generate the structured audit record, even when checks fail.
       - name: Generate audit record
+        id: audit_record
         if: always()
         env:
           EVENT_NAME: ${{ github.event_name }}
@@ -256,13 +261,14 @@ jobs:
           DISCOVERY_OUTCOME: ${{ steps.discovery.outcome }}
           PYLINT_OUTCOME: ${{ steps.pylint.outcome }}
           TEST_OUTCOME: ${{ steps.tests.outcome }}
-          WAVE_ID: ${{ inputs.wave_id }}
-          REGION: ${{ inputs.region }}
-          TARGET_ENVIRONMENT: ${{ inputs.environment }}
-          ARTIFACT_VERSION: ${{ inputs.artifact_version }}
-          TERRAFORM_PLAN_RESULT: ${{ inputs.terraform_plan_result }}
-          TERRAFORM_APPLY_RESULT: ${{ inputs.terraform_apply_result }}
-          APPROVAL_DETAILS: ${{ inputs.approval_details }}
+          # Manual input takes priority; repository variables are the defaults.
+          WAVE_ID: ${{ inputs.wave_id || vars.AUDIT_WAVE_ID || '' }}
+          REGION: ${{ inputs.region || vars.AWS_REGION || '' }}
+          TARGET_ENVIRONMENT: ${{ inputs.environment || vars.TARGET_ENVIRONMENT || '' }}
+          ARTIFACT_VERSION: ${{ inputs.artifact_version || vars.ARTIFACT_VERSION || '' }}
+          TERRAFORM_PLAN_RESULT: ${{ inputs.terraform_plan_result || vars.TERRAFORM_PLAN_RESULT || '' }}
+          TERRAFORM_APPLY_RESULT: ${{ inputs.terraform_apply_result || vars.TERRAFORM_APPLY_RESULT || '' }}
+          APPROVAL_DETAILS: ${{ inputs.approval_details || vars.APPROVAL_DETAILS || '' }}
           RELEASE_TAG: ${{ github.event.release.tag_name || github.ref_name }}
         run: |
           python - <<'PY'
@@ -275,6 +281,13 @@ jobs:
 
           def env(name):
               return os.environ.get(name, "")
+
+          def metadata(name):
+              """Return metadata as text, treating false-like placeholders as missing."""
+              value = env(name).strip()
+              if value.lower() in {"false", "null", "none"}:
+                  return ""
+              return value
 
           pylint_score = None
           report = Path("pylint-report.txt")
@@ -321,10 +334,10 @@ jobs:
               ),
               "release_tag": env("RELEASE_TAG"),
               "traceability": {
-                  "wave_id": env("WAVE_ID"),
-                  "region": env("REGION"),
-                  "environment": env("TARGET_ENVIRONMENT"),
-                  "artifact_version": env("ARTIFACT_VERSION"),
+                  "wave_id": metadata("WAVE_ID"),
+                  "region": metadata("REGION"),
+                  "environment": metadata("TARGET_ENVIRONMENT"),
+                  "artifact_version": metadata("ARTIFACT_VERSION"),
               },
               "testing_and_quality": {
                   "compile_outcome": env("COMPILE_OUTCOME"),
@@ -357,6 +370,7 @@ jobs:
 
       # Write a readable summary to the Actions run page.
       - name: Write workflow summary
+        id: summary
         if: always()
         env:
           COMPILE_OUTCOME: ${{ steps.compile.outcome }}
@@ -364,10 +378,11 @@ jobs:
           PYLINT_OUTCOME: ${{ steps.pylint.outcome }}
           TEST_OUTCOME: ${{ steps.tests.outcome }}
           COMMIT_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
-          WAVE_ID: ${{ inputs.wave_id }}
-          REGION: ${{ inputs.region }}
-          TARGET_ENVIRONMENT: ${{ inputs.environment }}
-          ARTIFACT_VERSION: ${{ inputs.artifact_version }}
+          # Keep summary values consistent with audit.json.
+          WAVE_ID: ${{ inputs.wave_id || vars.AUDIT_WAVE_ID || '' }}
+          REGION: ${{ inputs.region || vars.AWS_REGION || '' }}
+          TARGET_ENVIRONMENT: ${{ inputs.environment || vars.TARGET_ENVIRONMENT || '' }}
+          ARTIFACT_VERSION: ${{ inputs.artifact_version || vars.ARTIFACT_VERSION || '' }}
         run: |
           {
             echo "# Python Audit Log"
@@ -395,10 +410,29 @@ jobs:
 
             echo
             echo "## Traceability Inputs"
-            echo "- Wave ID: ${WAVE_ID:-Not supplied}"
-            echo "- Region: ${REGION:-Not supplied}"
-            echo "- Environment: ${TARGET_ENVIRONMENT:-Not supplied}"
-            echo "- Artifact version: ${ARTIFACT_VERSION:-Not supplied}"
+            if [ -n "$WAVE_ID" ] && [ "${WAVE_ID,,}" != "false" ] && [ "${WAVE_ID,,}" != "null" ]; then
+              echo "- Wave ID: $WAVE_ID"
+            else
+              echo "- Wave ID: Not supplied"
+            fi
+
+            if [ -n "$REGION" ] && [ "${REGION,,}" != "false" ] && [ "${REGION,,}" != "null" ]; then
+              echo "- Region: $REGION"
+            else
+              echo "- Region: Not supplied"
+            fi
+
+            if [ -n "$TARGET_ENVIRONMENT" ] && [ "${TARGET_ENVIRONMENT,,}" != "false" ] && [ "${TARGET_ENVIRONMENT,,}" != "null" ]; then
+              echo "- Environment: $TARGET_ENVIRONMENT"
+            else
+              echo "- Environment: Not supplied"
+            fi
+
+            if [ -n "$ARTIFACT_VERSION" ] && [ "${ARTIFACT_VERSION,,}" != "false" ] && [ "${ARTIFACT_VERSION,,}" != "null" ]; then
+              echo "- Artifact version: $ARTIFACT_VERSION"
+            else
+              echo "- Artifact version: Not supplied"
+            fi
 
             echo
             echo "## Reports"
@@ -410,6 +444,7 @@ jobs:
 
       # Print which reports exist and their sizes.
       - name: Detailed diagnostic summary
+        id: report_diagnostics
         if: always()
         run: |
           echo "::group::Generated Report Files"
@@ -433,6 +468,7 @@ jobs:
 
       # Upload all available audit and quality reports.
       - name: Upload audit and diagnostic reports
+        id: upload_reports
         if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -444,6 +480,53 @@ jobs:
             htmlcov/
           if-no-files-found: warn
           retention-days: 90
+
+      # Annotate outcomes from operational and reporting steps as well as quality checks.
+      - name: Annotate audit workflow operations
+        if: always()
+        env:
+          CHECKOUT_OUTCOME: ${{ steps.checkout.outcome }}
+          DIAGNOSTICS_OUTCOME: ${{ steps.diagnostics.outcome }}
+          SETUP_OUTCOME: ${{ steps.setup_python.outcome }}
+          INSTALL_OUTCOME: ${{ steps.install_tools.outcome }}
+          AUDIT_RECORD_OUTCOME: ${{ steps.audit_record.outcome }}
+          SUMMARY_OUTCOME: ${{ steps.summary.outcome }}
+          REPORT_DIAGNOSTICS_OUTCOME: ${{ steps.report_diagnostics.outcome }}
+          UPLOAD_OUTCOME: ${{ steps.upload_reports.outcome }}
+          WAVE_ID: ${{ inputs.wave_id || vars.AUDIT_WAVE_ID || '' }}
+        run: |
+          echo "::group::Audit Workflow Operation Annotations"
+
+          annotate_step() {
+            LABEL="$1"
+            OUTCOME="$2"
+            case "$OUTCOME" in
+              success)
+                echo "::notice title=$LABEL Passed::$LABEL completed successfully."
+                ;;
+              skipped)
+                echo "::warning title=$LABEL Skipped::$LABEL was skipped; check the workflow conditions."
+                ;;
+              *)
+                echo "::error title=$LABEL Failed::$LABEL did not complete successfully (outcome: ${OUTCOME:-unknown}). Review the step log."
+                ;;
+            esac
+          }
+
+          annotate_step "Source Checkout" "$CHECKOUT_OUTCOME"
+          annotate_step "Workflow Diagnostics" "$DIAGNOSTICS_OUTCOME"
+          annotate_step "Python Setup" "$SETUP_OUTCOME"
+          annotate_step "Python Tool Installation" "$INSTALL_OUTCOME"
+          annotate_step "Audit Record Generation" "$AUDIT_RECORD_OUTCOME"
+          annotate_step "Workflow Summary" "$SUMMARY_OUTCOME"
+          annotate_step "Report Diagnostics" "$REPORT_DIAGNOSTICS_OUTCOME"
+          annotate_step "Report Artifact Upload" "$UPLOAD_OUTCOME"
+
+          if [ -z "${WAVE_ID:-}" ]; then
+            echo "::notice title=Optional Traceability Metadata::Wave ID was not supplied by workflow input or repository variable."
+          fi
+
+          echo "::endgroup::"
 
       # Fail the job when any required quality gate fails.
       - name: Enforce quality gates
