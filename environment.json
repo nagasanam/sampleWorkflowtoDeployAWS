@@ -1,0 +1,107 @@
+{
+  "elc-online-aws-connect-dev/eulo/ccare": {
+    "account_id": "290172088993",
+    "gh_environment": "connect-dev",
+    "short_env": "dev",
+    "region": "eu-west-2",
+    "ro_role_arn": "arn:aws:iam::290172088993:role/global-ccare-aws-connect-dev-ro20260819171128292500000004",
+    "rw_role_arn": "arn:aws:iam::290172088993:role/global-ccare-aws-connect-dev-rw20260819171128291400000003",
+    "trusted_branches": [
+      "main"
+    ],
+     
+    "state_bucket": "sample-lambda-bucket-dbm",
+    "state_region": "eu-west-2",
+    "state_key_prefix": "dev/global-ccare-aws",
+    "plan_artifact_bucket": "",
+    "lex_bot_id": "",
+    "lex_backup_bucket": ""
+  },
+  "elc-online-aws-connect-preprod/eulo/ccare": {
+    "account_id": "035351467906",
+    "gh_environment": "connect-preprod",
+    "short_env": "preprod",
+    "region": "eu-west-2",
+    "ro_role_arn": "arn:aws:iam::035351467906:role/global-ccare-aws-connect-preprod-ro20260819171128879000000001",
+    "rw_role_arn": "arn:aws:iam::035351467906:role/global-ccare-aws-connect-preprod-rw20260819171128886100000004",
+    "trusted_branches": [
+      "main"
+    ],
+    "state_bucket": "aws-terraform-oidc-main20260527192853558100000003",
+    "state_region": "us-east-1",
+    "state_key_prefix": "preprod/global-ccare-aws",
+    "plan_artifact_bucket": "",
+    "lex_bot_id": "",
+    "lex_backup_bucket": ""
+  },
+  "elc-online-aws-connect-prod/eulo/ccare": {
+    "account_id": "868072837533",
+    "gh_environment": "connect-prod",
+    "short_env": "prod",
+    "region": "eu-west-2",
+    "ro_role_arn": "arn:aws:iam::868072837533:role/global-ccare-aws-connect-prod-ro20260819171135944700000004",
+    "rw_role_arn": "arn:aws:iam::868072837533:role/global-ccare-aws-connect-prod-rw20260819171135940000000002",
+    "trusted_branches": [
+      "main"
+    ],
+    "state_bucket": "aws-terraform-oidc-main20260527202647614700000003",
+    "state_region": "us-east-1",
+    "state_key_prefix": "prod/global-ccare-aws",
+    "plan_artifact_bucket": "",
+    "lex_bot_id": "",
+    "lex_backup_bucket": ""
+  },
+  "elc-online-aws-connect-sandbox/eulo/ccare": {
+    "account_id": "660388268716",
+    "gh_environment": "connect-sandbox",
+    "short_env": "sandbox",
+    "region": "eu-west-2",
+    "ro_role_arn": "arn:aws:iam::660388268716:role/GithubOIDC",
+    "rw_role_arn": "arn:aws:iam::660388268716:role/GithubOIDC",
+    "trusted_branches": [
+      "main",
+      "feature/22397-sja-connect-supporting-infra"
+    ],
+    "state_bucket": "ebs-terraform-state-sbx",
+    "state_region": "eu-west-2",
+    "state_key_prefix": "sandbox/global-ccare-aws",
+    "plan_artifact_bucket": "ebs-terraform-state-sbx",
+    "lex_bot_id": "",
+    "lex_backup_bucket": ""
+  },
+  "elc-online-aws-connect-stage/eulo/ccare": {
+    "account_id": "183088117873",
+    "gh_environment": "connect-stage",
+    "short_env": "stage",
+    "region": "eu-west-2",
+    "ro_role_arn": "arn:aws:iam::183088117873:role/global-ccare-aws-connect-stage-ro20260819171135081300000003",
+    "rw_role_arn": "arn:aws:iam::183088117873:role/global-ccare-aws-connect-stage-rw20260819171135083700000004",
+    "trusted_branches": [
+      "main"
+    ],
+    "state_bucket": "aws-terraform-oidc-main20260527190903580900000003",
+    "state_region": "us-east-1",
+    "state_key_prefix": "stage/global-ccare-aws",
+    "plan_artifact_bucket": "",
+    "lex_bot_id": "",
+    "lex_backup_bucket": ""
+  },
+  "elc-online-aws-connect-uat/eulo/ccare": {
+    "account_id": "402079573646",
+    "gh_environment": "connect-uat",
+    "short_env": "uat",
+    "region": "eu-west-2",
+    "ro_role_arn": "arn:aws:iam::402079573646:role/global-ccare-aws-connect-uat-ro20260826213339663600000001",
+    "rw_role_arn": "arn:aws:iam::402079573646:role/global-ccare-aws-connect-uat-rw20260826213339669700000003",
+    "trusted_branches": [
+      "main"
+    ],
+    "state_bucket": "aws-terraform-oidc-main20260527191822122200000003",
+    "state_region": "us-east-1",
+    "state_key_prefix": "uat/global-ccare-aws",
+    "plan_artifact_bucket": "",
+    "lex_bot_id": "",
+    "lex_backup_bucket": ""
+  }
+}
+ 
