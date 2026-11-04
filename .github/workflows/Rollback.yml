@@ -1,13 +1,6 @@
-name: CloudWatch Alarm Demo
+name: SNS GitHub Actions Trigger
 
 on:
-  push:
-    branches:
-      - main
-
-  workflow_dispatch:
-
-  # Receives CloudWatch alarm events through GitHub repository_dispatch.
   repository_dispatch:
     types:
       - cloudwatch_alarm
@@ -20,21 +13,22 @@ env:
   TARGET_ENV: elc-online-aws-connect-sandbox/eulo/ccare
 
 jobs:
-  alarm-demo:
+  sns-trigger:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout Feature Branch
+      # Checkout repository
+      - name: Checkout Repository
         uses: actions/checkout@v4
 
-      # Displays the event name and payload for debugging.
-      - name: Debug GitHub Event Payload
+      # Display SNS event payload
+      - name: Debug SNS Event Payload
         run: |
           echo "Event Name: $GITHUB_EVENT_NAME"
-          echo "Complete GitHub Event Payload:"
+          echo "SNS CloudWatch Alarm Payload:"
           cat "$GITHUB_EVENT_PATH"
 
-      # Reads AWS role, region, and account details from environments.json.
+      # Resolve AWS configuration
       - name: Resolve AWS Configuration
         id: target
         shell: bash
@@ -50,15 +44,15 @@ jobs:
             "account_id=\(.account_id)"
           ' environments.json >> "$GITHUB_OUTPUT"
 
-      # Authenticates GitHub Actions with AWS using OIDC.
+      # AWS OIDC authentication
       - name: Configure AWS Credentials using OIDC
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ steps.target.outputs.role_arn }}
-          role-session-name: cloudwatch-alarm-demo-${{ github.run_id }}
+          role-session-name: sns-trigger-${{ github.run_id }}
           aws-region: ${{ steps.target.outputs.region }}
 
-      # Verifies that the authenticated AWS account matches the expected account.
+      # Verify AWS identity
       - name: Verify AWS Identity
         env:
           EXPECTED_ACCOUNT: ${{ steps.target.outputs.account_id }}
@@ -78,52 +72,28 @@ jobs:
 
           echo "AWS OIDC authentication successful!"
 
-      # Fetches the latest alarm name and state directly from CloudWatch.
-      - name: Fetch CloudWatch Alarm Details
-        id: alarm
+      # Display CloudWatch alarm details received through SNS and Lambda
+      - name: Display CloudWatch Alarm Details
         env:
-          AWS_REGION: ${{ steps.target.outputs.region }}
-          ALARM_NAME: Demo-Automation-Alarm
+          ALARM_NAME: ${{ github.event.client_payload.alarm_name }}
+          ALARM_STATE: ${{ github.event.client_payload.alarm_state }}
+          ALARM_REASON: ${{ github.event.client_payload.reason }}
         run: |
           set -euo pipefail
 
-          echo "Fetching alarm details from CloudWatch..."
+          echo "SNS Notification Received!"
+          echo "Alarm Name: $ALARM_NAME"
+          echo "Alarm State: $ALARM_STATE"
+          echo "Reason: $ALARM_REASON"
 
-          ALARM_JSON=$(aws cloudwatch describe-alarms \
-            --alarm-names "$ALARM_NAME" \
-            --region "$AWS_REGION" \
-            --output json)
-
-          echo "$ALARM_JSON" | jq .
-
-          FETCHED_NAME=$(echo "$ALARM_JSON" | jq -r '.MetricAlarms[0].AlarmName // empty')
-          FETCHED_STATE=$(echo "$ALARM_JSON" | jq -r '.MetricAlarms[0].StateValue // empty')
-
-          if [ -z "$FETCHED_NAME" ] || [ -z "$FETCHED_STATE" ]; then
-            echo "Alarm details not found!"
+          if [ -z "$ALARM_NAME" ] || [ -z "$ALARM_STATE" ]; then
+            echo "Alarm details missing!"
             exit 1
           fi
 
-          echo "alarm_name=$FETCHED_NAME" >> "$GITHUB_OUTPUT"
-          echo "alarm_state=$FETCHED_STATE" >> "$GITHUB_OUTPUT"
-
-          echo "Alarm Name: $FETCHED_NAME"
-          echo "Alarm State: $FETCHED_STATE"
-
-      # Displays the CloudWatch alarm information and current state.
-      - name: Display CloudWatch Alarm Details
-        env:
-          ALARM_NAME: ${{ steps.alarm.outputs.alarm_name }}
-          ALARM_STATE: ${{ steps.alarm.outputs.alarm_state }}
+      # Validate alarm state
+      - name: Validate Alarm State
+        if: github.event.client_payload.alarm_state == 'ALARM'
         run: |
-          echo "CloudWatch Alarm Demo Workflow"
-          echo "Trigger Event: ${{ github.event_name }}"
-          echo "Branch: $GITHUB_REF_NAME"
-          echo "Alarm Name: $ALARM_NAME"
-          echo "Alarm State: $ALARM_STATE"
-
-          if [ "$ALARM_STATE" = "ALARM" ]; then
-            echo "CloudWatch Alarm is in ALARM state!"
-          else
-            echo "Current CloudWatch Alarm State: $ALARM_STATE"
-          fi
+          echo "CloudWatch Alarm is in ALARM state!"
+          echo "SNS to Lambda to GitHub Actions integration successful!"
